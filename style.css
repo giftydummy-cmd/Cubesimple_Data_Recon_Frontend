@@ -134,12 +134,6 @@ input[type=checkbox] { width: 17px; height: 17px; accent-color: var(--bs-orange)
 .banner-err { background: var(--bs-orange-soft); color: #B33A0C; border: 1px solid #FBC7B0; }
 .banner-ok  { background: var(--success-bg); color: var(--success); border: 1px solid #A9DCC4; }
 .mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12.5px; }
-details.sql summary { cursor: pointer; color: var(--muted); font-size: 13px; font-weight: 600; }
-details.sql pre {
-  background: var(--bs-black); color: #F2EFE9; padding: 16px; border-radius: 10px;
-  overflow-x: auto; font-size: 12.5px; line-height: 1.5;
-  border-left: 4px solid var(--bs-yellow);
-}
 .spin {
   display: inline-block; width: 13px; height: 13px; border: 2px solid rgba(31,31,31,.25);
   border-top-color: var(--bs-black); border-radius: 50%; animation: sp .7s linear infinite;

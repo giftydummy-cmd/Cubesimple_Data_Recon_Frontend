@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120">
+  <title>Brightspeed</title>
+  <!--
+    Same geometry as BrightspeedMark in script.jsx: four quarter-shapes on the corners of a
+    120x120 box — a solid disc (r=30), a white gap, then a quarter ring (r=42 to r=76).
+    The in-app version multiplies overlapping rings with mix-blend-mode, but favicon
+    renderers routinely ignore blend modes, so here each arm is drawn explicitly as
+    "ring A clipped to ring B" and filled with the multiply result (#FFC800 x #FB621F).
+  -->
+  <defs>
+    <path id="ring-tl" d="M 76,0 A 76,76 0 0,1 0,76 L 0,42 A 42,42 0 0,0 42,0 Z"/>
+    <path id="ring-tr" d="M 120,76 A 76,76 0 0,1 44,0 L 78,0 A 42,42 0 0,0 120,42 Z"/>
+    <path id="ring-br" d="M 44,120 A 76,76 0 0,1 120,44 L 120,78 A 42,42 0 0,0 78,120 Z"/>
+    <path id="ring-bl" d="M 0,44 A 76,76 0 0,1 76,120 L 42,120 A 42,42 0 0,0 0,78 Z"/>
+    <clipPath id="clip-tl"><use href="#ring-tl"/></clipPath>
+    <clipPath id="clip-br"><use href="#ring-br"/></clipPath>
+  </defs>
+
+  <!-- solid corner discs -->
+  <g fill="#FFC800">
+    <path d="M 0,0 L 30,0 A 30,30 0 0,1 0,30 Z"/>
+    <path d="M 120,0 L 120,30 A 30,30 0 0,1 90,0 Z"/>
+    <path d="M 120,120 L 90,120 A 30,30 0 0,1 120,90 Z"/>
+    <path d="M 0,120 L 0,90 A 30,30 0 0,1 30,120 Z"/>
+  </g>
+
+  <!-- quarter rings, alternating around the pinwheel -->
+  <use href="#ring-tl" fill="#FB621F"/>
+  <use href="#ring-tr" fill="#FFC800"/>
+  <use href="#ring-br" fill="#FB621F"/>
+  <use href="#ring-bl" fill="#FFC800"/>
+
+  <!-- arms: each adjacent pair's intersection, in the multiplied colour -->
+  <g fill="#FB4D00">
+    <use href="#ring-tr" clip-path="url(#clip-tl)"/>
+    <use href="#ring-bl" clip-path="url(#clip-tl)"/>
+    <use href="#ring-tr" clip-path="url(#clip-br)"/>
+    <use href="#ring-bl" clip-path="url(#clip-br)"/>
+  </g>
+</svg>

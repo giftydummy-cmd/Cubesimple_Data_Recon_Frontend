@@ -418,9 +418,7 @@ function App() {
 
         <h1 style={{ margin: '0 0 6px', fontSize: 31, letterSpacing: '-.7px' }}>Data Reconciliation</h1>
         <p style={{ color: 'var(--muted)', margin: '0 0 24px', fontSize: 15 }}>
-          Source of truth: <strong style={{ color: 'var(--ink)' }}>BigQuery</strong> · Accounts with a
-          {' '}<strong style={{ color: 'var(--ink)' }}>100%</strong> verdict are fully reconciled and are
-          filtered out server-side
+          Source of truth: <strong style={{ color: 'var(--ink)' }}>BigQuery</strong>
         </p>
 
         {/* ---------- Step 1: BAN entry ---------- */}
@@ -489,9 +487,6 @@ function App() {
                 {resolvedAll.length > 0 ? ` · ${resolvedAll.length} resolved this session` : ''}
               </span>
               <div style={{ marginLeft: 'auto', display: 'flex', gap: 10, alignItems: 'center' }}>
-                <span style={{ color: 'var(--muted)', fontSize: 13 }}>
-                  {result.elapsedMs} ms · job {result.jobId}
-                </span>
                 <button className="btn btn-ghost btn-sm" onClick={() => setAllOpen(true)}>Expand all</button>
                 <button className="btn btn-ghost btn-sm" onClick={() => setAllOpen(false)}>Collapse all</button>
                 <button
@@ -527,13 +522,6 @@ function App() {
               />
             ))}
           </>
-        )}
-
-        {result?.sql && (
-          <details className="sql" style={{ marginTop: 24 }}>
-            <summary>View the BigQuery reconciliation query that produced these rows</summary>
-            <pre>{result.sql}</pre>
-          </details>
         )}
       </div>
     </div>
