@@ -107,9 +107,78 @@ function StatCard({ label, value, accent }) {
   );
 }
 
+/* ---------- Shared issue table ----------
+   Compact by default: the BAN, a few context columns, the issue itself, and a Resolve
+   button — the full source row is one "Show all columns" click away. Resolving is a
+   local workflow aid: it marks the row done for this session, nothing is written back. */
+function IssueRowsTable({ columns, allColumns, rows, banColumn, issueLabel, showAll,
+                          rowKey, resolved, onToggleResolve }) {
+  const cols = showAll ? allColumns : columns;
+  return (
+    <div className="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            {cols.map(c => <th key={c}>{c}</th>)}
+            <th>Issue</th>
+            <th style={{ textAlign: 'right' }}>Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, i) => {
+            const key = rowKey(row, i);
+            const done = resolved.has(key);
+            return (
+              <tr key={key} style={{ opacity: done ? 0.45 : undefined }}>
+                {cols.map(col => {
+                  const isBan = col === banColumn;
+                  return (
+                    <td
+                      key={col}
+                      className={isBan ? 'mono' : undefined}
+                      style={{
+                        fontWeight: isBan ? 700 : undefined,
+                        color: isBan ? undefined : 'var(--muted)',
+                        textDecoration: done ? 'line-through' : undefined,
+                      }}
+                    >
+                      {renderCell(row[col])}
+                    </td>
+                  );
+                })}
+                <td style={{ color: '#B33A0C', fontWeight: 600, textDecoration: done ? 'line-through' : undefined }}>
+                  {issueLabel}
+                </td>
+                <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                  <button
+                    className={done ? 'btn btn-ghost btn-sm' : 'btn btn-primary btn-sm'}
+                    onClick={() => onToggleResolve(key)}
+                  >
+                    {done ? 'Resolved ✓' : 'Resolve'}
+                  </button>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 /* ---------- One collapsible issue group ---------- */
-function IssueGroup({ index, group, columns, banColumn, open, onToggleOpen }) {
+function IssueGroup({ index, group, columns, banColumn, open, onToggleOpen, resolved, onToggleResolve }) {
+  const [showAll, setShowAll] = useState(false);
   const sevClass = group.severity === 'High' ? 'sev-high' : 'sev-medium';
+
+  /* Compact view: the BAN plus a little context; the issue is the verdict itself. */
+  const compactColumns = useMemo(() => {
+    const keep = columns.includes(banColumn) ? [banColumn] : [];
+    for (const c of ['Effective_Account_Type', 'Account_Type']) {
+      if (columns.includes(c)) { keep.push(c); break; }
+    }
+    return keep;
+  }, [columns, banColumn]);
 
   return (
     <div className={`card issue ${open ? 'open' : ''} ${sevClass}`}>
@@ -127,40 +196,89 @@ function IssueGroup({ index, group, columns, banColumn, open, onToggleOpen }) {
 
       {open && (
         <div className="issue-body">
-          <div className="group-toolbar">
+          <div className="group-toolbar" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <span className="fixplan">
               {group.rows.length} row{group.rows.length === 1 ? '' : 's'} · verdict: {group.title}
             </span>
+            <button
+              className="btn btn-ghost btn-sm"
+              style={{ marginLeft: 'auto' }}
+              onClick={() => setShowAll(v => !v)}
+            >
+              {showAll ? 'Show issue summary' : 'Show all columns'}
+            </button>
           </div>
 
-          <div className="table-scroll">
-            <table>
-              <thead>
-                <tr>{columns.map(c => <th key={c}>{c}</th>)}</tr>
-              </thead>
-              <tbody>
-                {group.rows.map((row, i) => (
-                  <tr key={`${row[banColumn] ?? 'row'}-${i}`}>
-                    {columns.map(col => {
-                      const isBan = col === banColumn;
-                      return (
-                        <td
-                          key={col}
-                          className={isBan ? 'mono' : undefined}
-                          style={{
-                            fontWeight: isBan ? 700 : undefined,
-                            color: isBan ? undefined : 'var(--muted)',
-                          }}
-                        >
-                          {renderCell(row[col])}
-                        </td>
-                      );
-                    })}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <IssueRowsTable
+            columns={compactColumns}
+            allColumns={columns}
+            rows={group.rows}
+            banColumn={banColumn}
+            issueLabel={group.title}
+            showAll={showAll}
+            rowKey={(row, i) => `${group.title}|${row[banColumn] ?? 'row'}|${i}`}
+            resolved={resolved}
+            onToggleResolve={onToggleResolve}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------- Account status mismatch (OM vs C360 vs BRIM) ----------
+   A second, independent check on the same BANs: the three systems must agree on the
+   account's status. The backend returns only the rows where they do not. */
+const ACCT_KEY = '__account_status__';
+
+function AccountStatusGroup({ index, acct, open, onToggleOpen, resolved, onToggleResolve }) {
+  const [showAll, setShowAll] = useState(false);
+  const columns = acct.columns ?? [];
+
+  /* Compact view: the BAN, the account type, and the three statuses being compared. */
+  const compactColumns = useMemo(
+    () => columns.filter(c =>
+      c === acct.banColumn || c === 'Account_Type' || /status/i.test(c)),
+    [columns, acct.banColumn]);
+
+  return (
+    <div className={`card issue ${open ? 'open' : ''} sev-high`}>
+      <button className="issue-head" onClick={onToggleOpen} aria-expanded={open}>
+        <span className="chev">▶</span>
+        <span style={{ flex: 1, minWidth: 0 }}>
+          <span className="issue-index">Issue {index + 1}</span>
+          <div className="issue-title">Account status mismatch — OM vs C360 vs BRIM</div>
+        </span>
+        <span className="sev sev-High">High</span>
+        <span className="count-badge">
+          {acct.mismatches} BAN{acct.mismatches === 1 ? '' : 's'} affected
+        </span>
+      </button>
+
+      {open && (
+        <div className="issue-body">
+          <div className="group-toolbar" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span className="fixplan">{acct.message}</span>
+            <button
+              className="btn btn-ghost btn-sm"
+              style={{ marginLeft: 'auto' }}
+              onClick={() => setShowAll(v => !v)}
+            >
+              {showAll ? 'Show issue summary' : 'Show all columns'}
+            </button>
           </div>
+
+          <IssueRowsTable
+            columns={compactColumns}
+            allColumns={columns}
+            rows={acct.data}
+            banColumn={acct.banColumn}
+            issueLabel="Account status mismatch"
+            showAll={showAll}
+            rowKey={(row, i) => `${ACCT_KEY}|${row[acct.banColumn] ?? 'row'}|${i}`}
+            resolved={resolved}
+            onToggleResolve={onToggleResolve}
+          />
         </div>
       )}
     </div>
@@ -171,6 +289,7 @@ function App() {
   const [banText, setBanText] = useState('');
   const [result, setResult]   = useState(null);   // full /check-bans response
   const [openIds, setOpenIds] = useState(() => new Set());
+  const [resolved, setResolved] = useState(() => new Set()); // row keys marked done this session
   const [loading, setLoading] = useState(false);
   const [error, setError]     = useState('');
 
@@ -207,12 +326,14 @@ function App() {
 
   const runCheck = useCallback(async () => {
     if (bans.length === 0) { setError('Enter at least one BAN.'); return; }
-    setError(''); setResult(null); setLoading(true);
+    setError(''); setResult(null); setResolved(new Set()); setLoading(true);
     try {
       const data = await checkBans(bans);
       setResult(data);
       /* Start expanded — the findings are the point of the page. */
-      setOpenIds(new Set((data.data ?? []).map(r => verdictKey(r[data.verdictColumn]))));
+      const ids = new Set((data.data ?? []).map(r => verdictKey(r[data.verdictColumn])));
+      if (data.accountStatus?.data?.length > 0) ids.add(ACCT_KEY);
+      setOpenIds(ids);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -220,14 +341,27 @@ function App() {
     }
   }, [bans]);
 
-  const clearAll = () => { setBanText(''); setResult(null); setError(''); setOpenIds(new Set()); };
+  const clearAll = () => {
+    setBanText(''); setResult(null); setError(''); setOpenIds(new Set()); setResolved(new Set());
+  };
+
+  const toggleResolve = useCallback((key) => setResolved(prev => {
+    const next = new Set(prev);
+    next.has(key) ? next.delete(key) : next.add(key);
+    return next;
+  }), []);
+
+  const acct = result?.accountStatus;
+  const acctRows = acct?.data?.length ?? 0;
 
   const toggleOpen = (title) => setOpenIds(prev => {
     const next = new Set(prev);
     next.has(title) ? next.delete(title) : next.add(title);
     return next;
   });
-  const setAllOpen = (on) => setOpenIds(on ? new Set(groups.map(g => g.title)) : new Set());
+  const setAllOpen = (on) => setOpenIds(on
+    ? new Set([...groups.map(g => g.title), ...(acctRows > 0 ? [ACCT_KEY] : [])])
+    : new Set());
 
   return (
     <div>
@@ -276,14 +410,23 @@ function App() {
 
         {error && <div className="banner banner-err" style={{ marginBottom: 20 }}>{error}</div>}
 
-        {/* "No discrepancies found." comes straight from the backend. */}
-        {result && result.totalDiscrepancies === 0 && (
-          <div className="banner banner-ok" style={{ marginBottom: 20 }}>{result.message}</div>
+        {/* "No discrepancies found." comes straight from the backend — but only when the
+            account-status check found nothing either. */}
+        {result && result.totalDiscrepancies === 0 && !(result.accountStatus?.mismatches > 0) && (
+          <div className="banner banner-ok" style={{ marginBottom: 20 }}>
+            {result.message}
+            {result.accountStatus ? ` ${result.accountStatus.message}` : ''}
+          </div>
         )}
-        {result && result.totalDiscrepancies > 0 && result.missingBans?.length > 0 && (
+        {result?.accountStatus?.message?.startsWith('Account status check failed') && (
+          <div className="banner banner-err" style={{ marginBottom: 20 }}>
+            {result.accountStatus.message}
+          </div>
+        )}
+        {result && result.missingBans?.length > 0 && (
           <div className="banner banner-err" style={{ marginBottom: 20 }}>
             {result.missingBans.length} BAN{result.missingBans.length === 1 ? ' was' : 's were'} not found
-            in the table: {result.missingBans.slice(0, 10).join(', ')}
+            in any reconciliation table: {result.missingBans.slice(0, 10).join(', ')}
             {result.missingBans.length > 10 ? ` (+${result.missingBans.length - 10} more)` : ''}
           </div>
         )}
@@ -299,17 +442,21 @@ function App() {
           <div style={{ display: 'flex', gap: 14, marginBottom: 24, flexWrap: 'wrap' }}>
             <StatCard label="Accounts scanned"    value={result.totalScanned}             accent="var(--bs-black)" />
             <StatCard label="Discrepancies found" value={result.totalDiscrepancies}       accent="var(--bs-orange)" />
+            {result.accountStatus && (
+              <StatCard label="Status mismatches" value={result.accountStatus.mismatches} accent="#B33A0C" />
+            )}
             <StatCard label="Not found in table"  value={result.missingBans?.length ?? 0} accent="#C9C3B8" />
           </div>
         )}
 
-        {/* ---------- Step 3: one collapsible section per verdict ---------- */}
-        {groups.length > 0 && (
+        {/* ---------- Step 3: one collapsible section per issue ---------- */}
+        {(groups.length > 0 || acctRows > 0) && (
           <>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
               <span className="eyebrow">Step 3 — Review by issue</span>
               <span style={{ color: 'var(--muted)', fontSize: 13 }}>
-                Every row whose {result.verdictColumn} is not 100%, grouped by verdict
+                Feature rows whose {result.verdictColumn} is not 100%, plus account status
+                disagreements between OM, C360 and BRIM
               </span>
               <div style={{ marginLeft: 'auto', display: 'flex', gap: 10, alignItems: 'center' }}>
                 <span style={{ color: 'var(--muted)', fontSize: 13 }}>
@@ -329,8 +476,21 @@ function App() {
                 banColumn={result.banColumn}
                 open={openIds.has(g.title)}
                 onToggleOpen={() => toggleOpen(g.title)}
+                resolved={resolved}
+                onToggleResolve={toggleResolve}
               />
             ))}
+
+            {acctRows > 0 && (
+              <AccountStatusGroup
+                index={groups.length}
+                acct={acct}
+                open={openIds.has(ACCT_KEY)}
+                onToggleOpen={() => toggleOpen(ACCT_KEY)}
+                resolved={resolved}
+                onToggleResolve={toggleResolve}
+              />
+            )}
           </>
         )}
 

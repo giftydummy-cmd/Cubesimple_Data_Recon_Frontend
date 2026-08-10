@@ -72,8 +72,7 @@ textarea:focus { outline: 3px solid rgba(255,200,0,.45); border-color: var(--bs-
   background: var(--bs-yellow-dark); transform: translateY(-1px);
   box-shadow: 0 4px 12px rgba(255,200,0,.4);
 }
-.btn-dark { background: var(--bs-black); color: #fff; }
-.btn-dark:hover:not(:disabled) { background: var(--bs-black-soft); transform: translateY(-1px); }
+/* Resolve reuses .btn-primary — same Supernova fill and dark label as the Check button. */
 .btn-ghost { background: transparent; color: var(--bs-black); border: 1.5px solid var(--line); }
 .btn-ghost:hover:not(:disabled) { border-color: var(--bs-black); }
 .btn-sm { padding: 8px 14px; font-size: 13px; }
