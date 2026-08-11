@@ -159,6 +159,65 @@ function StatCard({ label, value, accent }) {
   );
 }
 
+/* ---------- Shared issue table ----------
+   Compact by default: the BAN, a few context columns, the issue itself, and a Resolve
+   button — the full source row is one "Show all columns" click away. Resolving is a
+   local workflow aid: it marks the row done for this session, nothing is written back. */
+function IssueRowsTable({ columns, allColumns, rows, banColumn, issueLabel, showAll,
+                          rowKey, resolved, onToggleResolve }) {
+  const cols = showAll ? allColumns : columns;
+  return (
+    <div className="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            {cols.map(c => <th key={c}>{c}</th>)}
+            <th>Issue</th>
+            <th style={{ textAlign: 'right' }}>Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, i) => {
+            const key = rowKey(row, i);
+            const done = resolved.has(key);
+            return (
+              <tr key={key} style={{ opacity: done ? 0.45 : undefined }}>
+                {cols.map(col => {
+                  const isBan = col === banColumn;
+                  return (
+                    <td
+                      key={col}
+                      className={isBan ? 'mono' : undefined}
+                      style={{
+                        fontWeight: isBan ? 700 : undefined,
+                        color: isBan ? undefined : 'var(--muted)',
+                        textDecoration: done ? 'line-through' : undefined,
+                      }}
+                    >
+                      {renderCell(row[col])}
+                    </td>
+                  );
+                })}
+                <td style={{ color: '#B33A0C', fontWeight: 600, textDecoration: done ? 'line-through' : undefined }}>
+                  {issueLabel}
+                </td>
+                <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                  <button
+                    className={done ? 'btn btn-ghost btn-sm' : 'btn btn-primary btn-sm'}
+                    onClick={() => onToggleResolve(key)}
+                  >
+                    {done ? 'Resolved ✓' : 'Resolve'}
+                  </button>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 /* ---------- One collapsible issue group ---------- */
 function IssueGroup({
   index, group, extraColumns, banColumn, open, onToggleOpen,
@@ -169,6 +228,15 @@ function IssueGroup({
   const allPicked = pending.length > 0 && picked.length === pending.length;
   const allDone   = pending.length === 0;
   const sevClass  = group.severity === 'High' ? 'sev-high' : 'sev-medium';
+
+  /* Compact view: the BAN plus a little context; the issue is the verdict itself. */
+  const compactColumns = useMemo(() => {
+    const keep = columns.includes(banColumn) ? [banColumn] : [];
+    for (const c of ['Effective_Account_Type', 'Account_Type']) {
+      if (columns.includes(c)) { keep.push(c); break; }
+    }
+    return keep;
+  }, [columns, banColumn]);
 
   return (
     <div className={`card issue ${open ? 'open' : ''} ${allDone ? 'done' : sevClass}`}>
@@ -188,7 +256,7 @@ function IssueGroup({
 
       {open && (
         <div className="issue-body">
-          <div className="group-toolbar">
+          <div className="group-toolbar" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <span className="fixplan">
               Fix route: {group.route.system} · {group.route.action}
             </span>
@@ -403,7 +471,9 @@ function App() {
     next.has(title) ? next.delete(title) : next.add(title);
     return next;
   });
-  const setAllOpen = (on) => setOpenIds(on ? new Set(groups.map(g => g.title)) : new Set());
+  const setAllOpen = (on) => setOpenIds(on
+    ? new Set([...groups.map(g => g.title), ...(acctRows > 0 ? [ACCT_KEY] : [])])
+    : new Set());
 
   return (
     <div>
@@ -450,14 +520,23 @@ function App() {
 
         {error && <div className="banner banner-err" style={{ marginBottom: 20 }}>{error}</div>}
 
-        {/* "No discrepancies found." comes straight from the backend. */}
-        {result && result.totalDiscrepancies === 0 && (
-          <div className="banner banner-ok" style={{ marginBottom: 20 }}>{result.message}</div>
+        {/* "No discrepancies found." comes straight from the backend — but only when the
+            account-status check found nothing either. */}
+        {result && result.totalDiscrepancies === 0 && !(result.accountStatus?.mismatches > 0) && (
+          <div className="banner banner-ok" style={{ marginBottom: 20 }}>
+            {result.message}
+            {result.accountStatus ? ` ${result.accountStatus.message}` : ''}
+          </div>
         )}
-        {result && result.totalDiscrepancies > 0 && result.missingBans?.length > 0 && (
+        {result?.accountStatus?.message?.startsWith('Account status check failed') && (
+          <div className="banner banner-err" style={{ marginBottom: 20 }}>
+            {result.accountStatus.message}
+          </div>
+        )}
+        {result && result.missingBans?.length > 0 && (
           <div className="banner banner-err" style={{ marginBottom: 20 }}>
             {result.missingBans.length} BAN{result.missingBans.length === 1 ? ' was' : 's were'} not found
-            in the table: {result.missingBans.slice(0, 10).join(', ')}
+            in any reconciliation table: {result.missingBans.slice(0, 10).join(', ')}
             {result.missingBans.length > 10 ? ` (+${result.missingBans.length - 10} more)` : ''}
           </div>
         )}
@@ -473,12 +552,15 @@ function App() {
           <div style={{ display: 'flex', gap: 14, marginBottom: 24, flexWrap: 'wrap' }}>
             <StatCard label="Accounts scanned"    value={result.totalScanned}             accent="var(--bs-black)" />
             <StatCard label="Discrepancies found" value={result.totalDiscrepancies}       accent="var(--bs-orange)" />
+            {result.accountStatus && (
+              <StatCard label="Status mismatches" value={result.accountStatus.mismatches} accent="#B33A0C" />
+            )}
             <StatCard label="Not found in table"  value={result.missingBans?.length ?? 0} accent="#C9C3B8" />
           </div>
         )}
 
-        {/* ---------- Step 3: one collapsible section per verdict ---------- */}
-        {groups.length > 0 && (
+        {/* ---------- Step 3: one collapsible section per issue ---------- */}
+        {(groups.length > 0 || acctRows > 0) && (
           <>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
               <span className="eyebrow">Step 3 — Review &amp; approve by issue</span>
@@ -521,6 +603,17 @@ function App() {
                 onResolve={resolve}
               />
             ))}
+
+            {acctRows > 0 && (
+              <AccountStatusGroup
+                index={groups.length}
+                acct={acct}
+                open={openIds.has(ACCT_KEY)}
+                onToggleOpen={() => toggleOpen(ACCT_KEY)}
+                resolved={resolved}
+                onToggleResolve={toggleResolve}
+              />
+            )}
           </>
         )}
       </div>
