@@ -218,6 +218,66 @@ function IssueRowsTable({ columns, allColumns, rows, banColumn, issueLabel, show
   );
 }
 
+/* ---------- Account status mismatch (OM vs C360 vs BRIM) ----------
+   A second, independent check on the same BANs: the three systems must agree on the
+   account's status. The backend returns only the rows where they do not. Resolving here
+   is a session-side checklist (no /api/resolve contract exists for status mismatches). */
+const ACCT_KEY = '__account_status__';
+
+function AccountStatusGroup({ index, acct, open, onToggleOpen, resolved, onToggleResolve }) {
+  const [showAll, setShowAll] = useState(false);
+  const columns = acct.columns ?? [];
+
+  /* Compact view: the BAN, the account type, and the three statuses being compared. */
+  const compactColumns = useMemo(
+    () => columns.filter(c =>
+      c === acct.banColumn || c === 'Account_Type' || /status/i.test(c)),
+    [columns, acct.banColumn]);
+
+  return (
+    <div className={`card issue ${open ? 'open' : ''} sev-high`}>
+      <button className="issue-head" onClick={onToggleOpen} aria-expanded={open}>
+        <span className="chev">▶</span>
+        <span style={{ flex: 1, minWidth: 0 }}>
+          <span className="issue-index">Issue {index + 1} · ACCOUNT_STATUS_MISMATCH</span>
+          <div className="issue-title">Account status mismatch — OM vs C360 vs BRIM</div>
+        </span>
+        <span className="sev sev-High">High</span>
+        <span className="count-badge">
+          {acct.mismatches} BAN{acct.mismatches === 1 ? '' : 's'} affected
+        </span>
+      </button>
+
+      {open && (
+        <div className="issue-body">
+          <div className="group-toolbar" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span className="fixplan">{acct.message}</span>
+            <button
+              className="btn btn-ghost btn-sm"
+              style={{ marginLeft: 'auto' }}
+              onClick={() => setShowAll(v => !v)}
+            >
+              {showAll ? 'Show issue summary' : 'Show all columns'}
+            </button>
+          </div>
+
+          <IssueRowsTable
+            columns={compactColumns}
+            allColumns={columns}
+            rows={acct.data}
+            banColumn={acct.banColumn}
+            issueLabel="Account status mismatch"
+            showAll={showAll}
+            rowKey={(row, i) => `${ACCT_KEY}|${row[acct.banColumn] ?? 'row'}|${i}`}
+            resolved={resolved}
+            onToggleResolve={onToggleResolve}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ---------- One collapsible issue group ---------- */
 function IssueGroup({
   index, group, extraColumns, banColumn, open, onToggleOpen,
@@ -228,15 +288,6 @@ function IssueGroup({
   const allPicked = pending.length > 0 && picked.length === pending.length;
   const allDone   = pending.length === 0;
   const sevClass  = group.severity === 'High' ? 'sev-high' : 'sev-medium';
-
-  /* Compact view: the BAN plus a little context; the issue is the verdict itself. */
-  const compactColumns = useMemo(() => {
-    const keep = columns.includes(banColumn) ? [banColumn] : [];
-    for (const c of ['Effective_Account_Type', 'Account_Type']) {
-      if (columns.includes(c)) { keep.push(c); break; }
-    }
-    return keep;
-  }, [columns, banColumn]);
 
   return (
     <div className={`card issue ${open ? 'open' : ''} ${allDone ? 'done' : sevClass}`}>
@@ -360,6 +411,7 @@ function App() {
   const [rows, setRows]         = useState([]);          // result.data + _id / _status / _code
   const [selected, setSelected] = useState(() => new Set());
   const [openIds, setOpenIds]   = useState(() => new Set());
+  const [resolved, setResolved] = useState(() => new Set()); // account-status rows ticked off
   const [loading, setLoading]   = useState(false);
   const [error, setError]       = useState('');
 
@@ -403,7 +455,8 @@ function App() {
 
   const runCheck = useCallback(async () => {
     if (bans.length === 0) { setError('Enter at least one BAN.'); return; }
-    setError(''); setResult(null); setRows([]); setSelected(new Set()); setLoading(true);
+    setError(''); setResult(null); setRows([]); setSelected(new Set());
+    setResolved(new Set()); setLoading(true);
     try {
       const data = await checkBans(bans);
       const verdictColumn = data.verdictColumn;
@@ -422,7 +475,9 @@ function App() {
       setResult(data);
       setRows(decorated);
       /* Start expanded — the findings are the point of the page. */
-      setOpenIds(new Set(decorated.map(r => r._verdict)));
+      const ids = new Set(decorated.map(r => r._verdict));
+      if (data.accountStatus?.data?.length > 0) ids.add(ACCT_KEY);
+      setOpenIds(ids);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -452,8 +507,17 @@ function App() {
 
   const clearAll = () => {
     setBanText(''); setResult(null); setRows([]);
-    setSelected(new Set()); setError(''); setOpenIds(new Set());
+    setSelected(new Set()); setError(''); setOpenIds(new Set()); setResolved(new Set());
   };
+
+  const toggleResolve = useCallback((key) => setResolved(prev => {
+    const next = new Set(prev);
+    next.has(key) ? next.delete(key) : next.add(key);
+    return next;
+  }), []);
+
+  const acct = result?.accountStatus;
+  const acctRows = acct?.data?.length ?? 0;
 
   const toggleRow = (id) => setSelected(prev => {
     const next = new Set(prev);
