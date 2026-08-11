@@ -6,6 +6,10 @@ import { createRoot } from 'react-dom/client';
 const API = '';
 const CHECK_ENDPOINT = '/api/check-bans';
 const RESOLVE_ENDPOINT = '/api/resolve';
+/* Resolving an OM vs C360 status mismatch: the backend re-checks the two systems and, for the
+   accounts that really disagree, calls the ServiceNow om_c360_sync flow that rewrites C360 to
+   match OM. */
+const RESOLVE_ACCOUNT_STATUS_ENDPOINT = '/api/resolve-account-status';
 
 /* The backend is schema-agnostic, so the billed/provisioned pair has to be named here.
    BRIM is the billing system; OM is Order Management, which carries what was actually
@@ -51,6 +55,32 @@ async function resolveItems(rows, banColumn) {
     agent: 'console-operator',
   });
 }
+
+/* Triggers the ServiceNow sync for one or more accounts. This call answers 200 even when some
+   BANs could not be started, so the per-BAN entries in results[] — not the HTTP status — decide
+   what each row shows. Only a request that could not be attempted at all throws. */
+const resolveAccountStatus = (bans) => post(RESOLVE_ACCOUNT_STATUS_ENDPOINT, { bans });
+
+/* Per-row outcome of a sync. The backend's `reason` refines `status`, and one refinement
+   matters to the operator: NO_ORDER_IN_SERVICENOW is a failure that retrying cannot fix,
+   because the account has no order for the flow to run against. Showing it as a plain red
+   "Failed" next to a Retry button would send people round a loop that always ends the same. */
+const NO_ORDER = 'NO_ORDER_IN_SERVICENOW';
+
+const syncOutcome = (o) => (o.reason === NO_ORDER ? NO_ORDER : o.status);
+
+const SYNC_LABEL = {
+  TRIGGERED: 'Flow triggered ✓',
+  SKIPPED:   'No sync needed',
+  FAILED:    'Failed',
+  [NO_ORDER]: 'No order in ServiceNow',
+};
+const SYNC_PILL = {
+  TRIGGERED: 'pill-resolved',
+  SKIPPED:   'pill-working',
+  FAILED:    'pill-failed',
+  [NO_ORDER]: 'pill-working',
+};
 
 const isBlank = (v) => v === null || v === undefined || String(v).trim() === '';
 const text = (v) => (isBlank(v) ? null : typeof v === 'object' ? JSON.stringify(v) : String(v));
@@ -161,10 +191,11 @@ function StatCard({ label, value, accent }) {
 
 /* ---------- Shared issue table ----------
    Compact by default: the BAN, a few context columns, the issue itself, and a Resolve
-   button — the full source row is one "Show all columns" click away. Resolving is a
-   local workflow aid: it marks the row done for this session, nothing is written back. */
+   button — the full source row is one "Show all columns" click away. Resolve here is a
+   real write: it asks the backend to run the ServiceNow sync for that account, and the
+   row then carries whatever the backend reported back for it. */
 function IssueRowsTable({ columns, allColumns, rows, banColumn, issueLabel, showAll,
-                          rowKey, resolved, onToggleResolve }) {
+                          rowKey, results, onResolve }) {
   const cols = showAll ? allColumns : columns;
   return (
     <div className="table-scroll">
@@ -173,15 +204,25 @@ function IssueRowsTable({ columns, allColumns, rows, banColumn, issueLabel, show
           <tr>
             {cols.map(c => <th key={c}>{c}</th>)}
             <th>Issue</th>
-            <th style={{ textAlign: 'right' }}>Action</th>
+            <th>Status</th>
+            <th style={{ textAlign: 'right', width: 150 }}>Action</th>
           </tr>
         </thead>
         <tbody>
           {rows.map((row, i) => {
             const key = rowKey(row, i);
-            const done = resolved.has(key);
+            const ban = row[banColumn];
+            const outcome = results.get(key);
+            const busy = outcome?.status === 'RESOLVING';
+            /* Only a triggered flow retires the row. A skip or a failure leaves it actionable:
+               nothing changed in C360, so striking it through would be a lie. */
+            const done = outcome?.status === 'TRIGGERED';
+            const kind = outcome && !busy ? syncOutcome(outcome) : null;
+            /* Offer Retry only where it could actually help. */
+            const retryable = kind === 'FAILED';
+
             return (
-              <tr key={key} style={{ opacity: done ? 0.45 : undefined }}>
+              <tr key={key} style={{ opacity: done ? 0.55 : undefined }}>
                 {cols.map(col => {
                   const isBan = col === banColumn;
                   return (
@@ -201,12 +242,38 @@ function IssueRowsTable({ columns, allColumns, rows, banColumn, issueLabel, show
                 <td style={{ color: '#B33A0C', fontWeight: 600, textDecoration: done ? 'line-through' : undefined }}>
                   {issueLabel}
                 </td>
+                <td style={{ minWidth: 240 }}>
+                  {outcome ? (
+                    <>
+                      <span className={`pill ${busy ? 'pill-working' : SYNC_PILL[kind] ?? 'pill-pending'}`}>
+                        {busy ? 'Triggering…' : SYNC_LABEL[kind] ?? outcome.status}
+                      </span>
+                      {outcome.message && (
+                        <div style={{ color: 'var(--muted)', fontSize: 12, marginTop: 5 }}>
+                          {outcome.serviceNowMessage ?? outcome.message}
+                        </div>
+                      )}
+                      {outcome.orderId && (
+                        <div className="mono" style={{ color: 'var(--muted)', fontSize: 12, marginTop: 3 }}>
+                          Order {outcome.orderId}
+                          {outcome.orderStatus ? ` · ${outcome.orderStatus}` : ''}
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <span className="pill pill-pending">Pending</span>
+                  )}
+                </td>
                 <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                   <button
-                    className={done ? 'btn btn-ghost btn-sm' : 'btn btn-primary btn-sm'}
-                    onClick={() => onToggleResolve(key)}
+                    className={done || kind === NO_ORDER ? 'btn btn-ghost btn-sm' : 'btn btn-primary btn-sm'}
+                    disabled={busy || done || kind === NO_ORDER}
+                    onClick={() => onResolve([{ key, ban }])}
                   >
-                    {done ? 'Resolved ✓' : 'Resolve'}
+                    {busy ? <><span className="spin" />Triggering…</>
+                      : done ? 'Synched ✓'
+                      : kind === NO_ORDER ? 'Not syncable'
+                      : retryable ? 'Retry' : 'Resolve'}
                   </button>
                 </td>
               </tr>
@@ -220,13 +287,19 @@ function IssueRowsTable({ columns, allColumns, rows, banColumn, issueLabel, show
 
 /* ---------- Account status mismatch (OM vs C360 vs BRIM) ----------
    A second, independent check on the same BANs: the three systems must agree on the
-   account's status. The backend returns only the rows where they do not. Resolving here
-   is a session-side checklist (no /api/resolve contract exists for status mismatches). */
+   account's status. The backend returns only the rows where they do not.
+
+   Resolve is wired to the real thing here. OM is the source of truth, so the fix is always
+   in the same direction — C360 is brought up to OM — and the backend runs it through the
+   ServiceNow om_c360_sync flow. */
 const ACCT_KEY = '__account_status__';
 
-function AccountStatusGroup({ index, acct, open, onToggleOpen, resolved, onToggleResolve }) {
+const acctRowKey = (banColumn) => (row, i) => `${ACCT_KEY}|${row[banColumn] ?? 'row'}|${i}`;
+
+function AccountStatusGroup({ index, acct, open, onToggleOpen, results, onResolve, syncMessage }) {
   const [showAll, setShowAll] = useState(false);
   const columns = acct.columns ?? [];
+  const rows = acct.data ?? [];
 
   /* Compact view: the BAN, the account type, and the three statuses being compared. */
   const compactColumns = useMemo(
@@ -234,8 +307,23 @@ function AccountStatusGroup({ index, acct, open, onToggleOpen, resolved, onToggl
       c === acct.banColumn || c === 'Account_Type' || /status/i.test(c)),
     [columns, acct.banColumn]);
 
+  const keyOf = useMemo(() => acctRowKey(acct.banColumn), [acct.banColumn]);
+
+  /* Rows still worth sending: not already triggered, not mid-flight, and not one of the
+     accounts ServiceNow has no order for — those would fail identically every time. */
+  const outstanding = rows
+    .map((row, i) => ({ key: keyOf(row, i), ban: row[acct.banColumn] }))
+    .filter(e => {
+      const o = results.get(e.key);
+      return o?.status !== 'TRIGGERED' && o?.status !== 'RESOLVING' && o?.reason !== NO_ORDER;
+    });
+
+  const busy = rows.some((row, i) => results.get(keyOf(row, i))?.status === 'RESOLVING');
+  const triggered = rows.filter((row, i) => results.get(keyOf(row, i))?.status === 'TRIGGERED').length;
+  const allDone = rows.length > 0 && triggered === rows.length;
+
   return (
-    <div className={`card issue ${open ? 'open' : ''} sev-high`}>
+    <div className={`card issue ${open ? 'open' : ''} ${allDone ? 'done' : 'sev-high'}`}>
       <button className="issue-head" onClick={onToggleOpen} aria-expanded={open}>
         <span className="chev">▶</span>
         <span style={{ flex: 1, minWidth: 0 }}>
@@ -243,34 +331,54 @@ function AccountStatusGroup({ index, acct, open, onToggleOpen, resolved, onToggl
           <div className="issue-title">Account status mismatch — OM vs C360 vs BRIM</div>
         </span>
         <span className="sev sev-High">High</span>
-        <span className="count-badge">
-          {acct.mismatches} BAN{acct.mismatches === 1 ? '' : 's'} affected
+        <span className={`count-badge ${allDone ? 'zero' : ''}`}>
+          {allDone
+            ? `All ${rows.length} triggered ✓`
+            : `${acct.mismatches} BAN${acct.mismatches === 1 ? '' : 's'} affected`}
         </span>
       </button>
 
       {open && (
         <div className="issue-body">
-          <div className="group-toolbar" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span className="fixplan">{acct.message}</span>
-            <button
-              className="btn btn-ghost btn-sm"
-              style={{ marginLeft: 'auto' }}
-              onClick={() => setShowAll(v => !v)}
-            >
-              {showAll ? 'Show issue summary' : 'Show all columns'}
-            </button>
+          <div className="group-toolbar" style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <span className="fixplan">
+              Fix route: ServiceNow · om_c360_sync(BAN) — C360 is updated to match OM
+            </span>
+            <div style={{ marginLeft: 'auto', display: 'flex', gap: 10 }}>
+              <button className="btn btn-ghost btn-sm" onClick={() => setShowAll(v => !v)}>
+                {showAll ? 'Show issue summary' : 'Show all columns'}
+              </button>
+              <button
+                className="btn btn-primary btn-sm"
+                disabled={busy || outstanding.length === 0}
+                onClick={() => onResolve(outstanding)}
+              >
+                {busy
+                  ? <><span className="spin" />Triggering…</>
+                  : `Resolve all ${outstanding.length} in this issue`}
+              </button>
+            </div>
           </div>
+
+          {syncMessage?.text && (
+            <div
+              className={`banner ${syncMessage.ok ? 'banner-ok' : 'banner-err'}`}
+              style={{ margin: '0 0 14px' }}
+            >
+              {syncMessage.text}
+            </div>
+          )}
 
           <IssueRowsTable
             columns={compactColumns}
             allColumns={columns}
-            rows={acct.data}
+            rows={rows}
             banColumn={acct.banColumn}
             issueLabel="Account status mismatch"
             showAll={showAll}
-            rowKey={(row, i) => `${ACCT_KEY}|${row[acct.banColumn] ?? 'row'}|${i}`}
-            resolved={resolved}
-            onToggleResolve={onToggleResolve}
+            rowKey={keyOf}
+            results={results}
+            onResolve={onResolve}
           />
         </div>
       )}
@@ -411,7 +519,11 @@ function App() {
   const [rows, setRows]         = useState([]);          // result.data + _id / _status / _code
   const [selected, setSelected] = useState(() => new Set());
   const [openIds, setOpenIds]   = useState(() => new Set());
-  const [resolved, setResolved] = useState(() => new Set()); // account-status rows ticked off
+  /* Row key -> the backend's outcome for that account, or {status:'RESOLVING'} while in flight. */
+  const [acctResults, setAcctResults] = useState(() => new Map());
+  /* { text, ok } — ok drives green vs orange, so a batch that triggered nothing never reads
+     as a success. */
+  const [acctMessage, setAcctMessage] = useState(null);
   const [loading, setLoading]   = useState(false);
   const [error, setError]       = useState('');
 
@@ -456,7 +568,7 @@ function App() {
   const runCheck = useCallback(async () => {
     if (bans.length === 0) { setError('Enter at least one BAN.'); return; }
     setError(''); setResult(null); setRows([]); setSelected(new Set());
-    setResolved(new Set()); setLoading(true);
+    setAcctResults(new Map()); setAcctMessage(null); setLoading(true);
     try {
       const data = await checkBans(bans);
       const verdictColumn = data.verdictColumn;
@@ -507,14 +619,54 @@ function App() {
 
   const clearAll = () => {
     setBanText(''); setResult(null); setRows([]);
-    setSelected(new Set()); setError(''); setOpenIds(new Set()); setResolved(new Set());
+    setSelected(new Set()); setError(''); setOpenIds(new Set());
+    setAcctResults(new Map()); setAcctMessage(null);
   };
 
-  const toggleResolve = useCallback((key) => setResolved(prev => {
-    const next = new Set(prev);
-    next.has(key) ? next.delete(key) : next.add(key);
-    return next;
-  }), []);
+  /* Resolve an OM vs C360 mismatch for real: hand the BANs to the backend, which re-checks
+     them and triggers the ServiceNow sync flow for the ones that still disagree.
+
+     The call returns 200 even when individual accounts fail, so each row is updated from its
+     own entry in results[] rather than from the HTTP status. Only a request that could not be
+     attempted at all (nothing listening, ServiceNow not configured) lands in catch, and there
+     the rows go back to Pending so the operator can retry. */
+  const resolveAccountStatusRows = useCallback(async (entries) => {
+    if (!entries.length) return;
+    setError(''); setAcctMessage(null);
+
+    setAcctResults(prev => {
+      const next = new Map(prev);
+      entries.forEach(e => next.set(e.key, { status: 'RESOLVING' }));
+      return next;
+    });
+
+    try {
+      const data = await resolveAccountStatus(entries.map(e => e.ban));
+      const byBan = new Map((data.results ?? []).map(r => [String(r.ban), r]));
+      setAcctResults(prev => {
+        const next = new Map(prev);
+        for (const e of entries) {
+          const r = byBan.get(String(e.ban));
+          next.set(e.key, r ?? {
+            status: 'FAILED',
+            message: 'The backend did not report an outcome for this BAN.',
+          });
+        }
+        return next;
+      });
+      /* Green only if something actually started. A batch where every account was skipped or
+         had no order is a real answer, but it is not a success. */
+      setAcctMessage({ text: data.message ?? '', ok: (data.triggered ?? 0) > 0 });
+    } catch (e) {
+      /* Nothing was started, so drop the in-flight marks rather than leaving spinners behind. */
+      setAcctResults(prev => {
+        const next = new Map(prev);
+        entries.forEach(e => next.delete(e.key));
+        return next;
+      });
+      setError(e.message);
+    }
+  }, []);
 
   const acct = result?.accountStatus;
   const acctRows = acct?.data?.length ?? 0;
@@ -674,8 +826,9 @@ function App() {
                 acct={acct}
                 open={openIds.has(ACCT_KEY)}
                 onToggleOpen={() => toggleOpen(ACCT_KEY)}
-                resolved={resolved}
-                onToggleResolve={toggleResolve}
+                results={acctResults}
+                onResolve={resolveAccountStatusRows}
+                syncMessage={acctMessage}
               />
             )}
           </>
