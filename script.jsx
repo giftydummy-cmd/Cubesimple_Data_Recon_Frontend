@@ -562,8 +562,7 @@ function App() {
         b.rows.length - a.rows.length);
   }, [rows, result]);
 
-  const pendingAll  = rows.filter(r => r._status === 'Pending');
-  const resolvedAll = rows.filter(r => r._status === 'Resolved');
+  const pendingAll = rows.filter(r => r._status === 'Pending');
 
   const runCheck = useCallback(async () => {
     if (bans.length === 0) { setError('Enter at least one BAN.'); return; }
@@ -709,10 +708,7 @@ function App() {
 
         {/* ---------- Step 1: BAN entry ---------- */}
         <div className="card" style={{ padding: 22, marginBottom: 20, borderTop: '4px solid var(--bs-yellow)' }}>
-          <div className="eyebrow" style={{ marginBottom: 4 }}>Step 1 — Target accounts</div>
-          <p style={{ margin: '0 0 12px', color: 'var(--muted)', fontSize: 14 }}>
-            Paste the BANs you want to reconcile (comma, space, or newline separated).
-          </p>
+          <div className="eyebrow" style={{ marginBottom: 12 }}>Paste the BANs</div>
           <textarea
             value={banText}
             onChange={(e) => setBanText(e.target.value)}
@@ -779,11 +775,6 @@ function App() {
         {(groups.length > 0 || acctRows > 0) && (
           <>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
-              <span className="eyebrow">Step 3 — Review &amp; approve by issue</span>
-              <span style={{ color: 'var(--muted)', fontSize: 13 }}>
-                {selected.size} row{selected.size === 1 ? '' : 's'} selected
-                {resolvedAll.length > 0 ? ` · ${resolvedAll.length} resolved this session` : ''}
-              </span>
               <div style={{ marginLeft: 'auto', display: 'flex', gap: 10, alignItems: 'center' }}>
                 <button className="btn btn-ghost btn-sm" onClick={() => setAllOpen(true)}>Expand all</button>
                 <button className="btn btn-ghost btn-sm" onClick={() => setAllOpen(false)}>Collapse all</button>
