@@ -4,7 +4,16 @@ import { createRoot } from 'react-dom/client';
 /* Same-origin: the Vite dev server proxies /api to the Java backend (see vite.config.ts),
    and when you run the shaded jar it serves this bundle itself on the same port. */
 const API = '';
-const ENDPOINT = '/api/check-bans';
+const CHECK_ENDPOINT = '/api/check-bans';
+const RESOLVE_ENDPOINT = '/api/resolve';
+
+/* The backend is schema-agnostic, so the billed/provisioned pair has to be named here.
+   BRIM is the billing system; OM is Order Management, which carries what was actually
+   provisioned. Change these two if the recon table is repointed. */
+const BILLED_COLUMN = 'BRIM_PRODUCT_ID';
+const PROVISIONED_COLUMN = 'OM_PRODUCT_ID';
+/* How many of the remaining columns to surface under the Detail line. */
+const EXTRA_DETAIL_COLUMNS = 3;
 
 /* Shown only when the network call itself fails, i.e. nothing is listening. */
 const BACKEND_HINT =
@@ -16,13 +25,13 @@ const parseBans = (text) =>
     text.split(/[\s,;]+/).map(s => s.trim().toUpperCase()).filter(Boolean)
   )];
 
-async function checkBans(bans) {
+async function post(endpoint, payload) {
   let res;
   try {
-    res = await fetch(API + ENDPOINT, {
+    res = await fetch(API + endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ bans }),
+      body: JSON.stringify(payload),
     });
   } catch {
     /* fetch only rejects for transport-level problems, never for a 4xx/5xx. */
@@ -34,12 +43,22 @@ async function checkBans(bans) {
   return body;
 }
 
+const checkBans = (bans) => post(CHECK_ENDPOINT, { bans });
+
+async function resolveItems(rows, banColumn) {
+  return post(RESOLVE_ENDPOINT, {
+    items: rows.map(r => ({ ban: r[banColumn], issue_code: r._code })),
+    agent: 'console-operator',
+  });
+}
+
+const isBlank = (v) => v === null || v === undefined || String(v).trim() === '';
+const text = (v) => (isBlank(v) ? null : typeof v === 'object' ? JSON.stringify(v) : String(v));
+
 /* BigQuery values arrive as strings, numbers, nulls, or nested structures. */
 function renderCell(value) {
-  if (value === null || value === undefined) return <span className="null-cell">—</span>;
-  if (typeof value === 'object') return JSON.stringify(value);
-  if (typeof value === 'boolean') return value ? 'true' : 'false';
-  return String(value);
+  const t = text(value);
+  return t === null ? <span className="null-cell">—</span> : t;
 }
 
 function verdictSeverity(value) {
@@ -53,6 +72,39 @@ function verdictSeverity(value) {
 function verdictKey(value) {
   if (value === null || value === undefined) return '(no verdict)';
   return String(value);
+}
+
+/* "Additional Product in C360" -> "ADDITIONAL_PRODUCT_IN_C360" */
+const issueCode = (verdict) =>
+  verdictKey(verdict).toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'UNCLASSIFIED';
+
+/* Reads the billed/provisioned pair back as the sentence the console shows. */
+function detailFor(row, verdict) {
+  const billed = text(row[BILLED_COLUMN]);
+  const provisioned = text(row[PROVISIONED_COLUMN]);
+  if (billed && provisioned) {
+    return billed === provisioned
+      ? `Billed and provisioned as ${billed}`
+      : `Billed as ${billed}, provisioned as ${provisioned}`;
+  }
+  if (provisioned) return `Provisioned as ${provisioned}, not billed in BRIM`;
+  if (billed) return `Billed as ${billed}, not provisioned in OM`;
+  return verdictKey(verdict);
+}
+
+/* Which system has to change, inferred from whichever side of the pair is missing more
+   often across the group. Counting beats any/some: one populated row should not flip the
+   route for a group where everything else is missing. */
+function fixRoute(rows) {
+  let missingBilled = 0;
+  let missingProvisioned = 0;
+  for (const r of rows) {
+    if (isBlank(r[BILLED_COLUMN])) missingBilled++;
+    if (isBlank(r[PROVISIONED_COLUMN])) missingProvisioned++;
+  }
+  if (missingBilled > missingProvisioned) return { system: 'BRIM', action: `addProduct(${PROVISIONED_COLUMN})` };
+  if (missingProvisioned > missingBilled) return { system: 'Order Management', action: `addProduct(${BILLED_COLUMN})` };
+  return { system: 'BRIM', action: `updateProduct(${PROVISIONED_COLUMN})` };
 }
 
 /* ---------- Brightspeed mark ----------
@@ -167,9 +219,15 @@ function IssueRowsTable({ columns, allColumns, rows, banColumn, issueLabel, show
 }
 
 /* ---------- One collapsible issue group ---------- */
-function IssueGroup({ index, group, columns, banColumn, open, onToggleOpen, resolved, onToggleResolve }) {
-  const [showAll, setShowAll] = useState(false);
-  const sevClass = group.severity === 'High' ? 'sev-high' : 'sev-medium';
+function IssueGroup({
+  index, group, extraColumns, banColumn, open, onToggleOpen,
+  selected, onToggleRow, onSelectAll, onResolve,
+}) {
+  const pending   = group.rows.filter(r => r._status === 'Pending');
+  const picked    = pending.filter(r => selected.has(r._id));
+  const allPicked = pending.length > 0 && picked.length === pending.length;
+  const allDone   = pending.length === 0;
+  const sevClass  = group.severity === 'High' ? 'sev-high' : 'sev-medium';
 
   /* Compact view: the BAN plus a little context; the issue is the verdict itself. */
   const compactColumns = useMemo(() => {
@@ -181,16 +239,18 @@ function IssueGroup({ index, group, columns, banColumn, open, onToggleOpen, reso
   }, [columns, banColumn]);
 
   return (
-    <div className={`card issue ${open ? 'open' : ''} ${sevClass}`}>
+    <div className={`card issue ${open ? 'open' : ''} ${allDone ? 'done' : sevClass}`}>
       <button className="issue-head" onClick={onToggleOpen} aria-expanded={open}>
         <span className="chev">▶</span>
         <span style={{ flex: 1, minWidth: 0 }}>
-          <span className="issue-index">Issue {index + 1}</span>
+          <span className="issue-index">Issue {index + 1} · {group.code}</span>
           <div className="issue-title">{group.title}</div>
         </span>
         <span className={`sev sev-${group.severity}`}>{group.severity}</span>
-        <span className="count-badge">
-          {group.banCount} BAN{group.banCount === 1 ? '' : 's'} affected
+        <span className={`count-badge ${allDone ? 'zero' : ''}`}>
+          {allDone
+            ? `All ${group.rows.length} resolved ✓`
+            : `${group.banCount} BAN${group.banCount === 1 ? '' : 's'} affected`}
         </span>
       </button>
 
@@ -198,87 +258,96 @@ function IssueGroup({ index, group, columns, banColumn, open, onToggleOpen, reso
         <div className="issue-body">
           <div className="group-toolbar" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <span className="fixplan">
-              {group.rows.length} row{group.rows.length === 1 ? '' : 's'} · verdict: {group.title}
+              Fix route: {group.route.system} · {group.route.action}
             </span>
-            <button
-              className="btn btn-ghost btn-sm"
-              style={{ marginLeft: 'auto' }}
-              onClick={() => setShowAll(v => !v)}
-            >
-              {showAll ? 'Show issue summary' : 'Show all columns'}
-            </button>
+            <div style={{ marginLeft: 'auto', display: 'flex', gap: 10 }}>
+              <button className="btn btn-ghost btn-sm" onClick={() => onSelectAll(pending, !allPicked)} disabled={allDone}>
+                {allPicked ? 'Clear selection' : `Select all ${pending.length}`}
+              </button>
+              <button className="btn btn-dark btn-sm" onClick={() => onResolve(picked)} disabled={picked.length === 0}>
+                Resolve selected ({picked.length})
+              </button>
+              <button className="btn btn-primary btn-sm" onClick={() => onResolve(pending)} disabled={allDone}>
+                Resolve all in this issue
+              </button>
+            </div>
           </div>
 
-          <IssueRowsTable
-            columns={compactColumns}
-            allColumns={columns}
-            rows={group.rows}
-            banColumn={banColumn}
-            issueLabel={group.title}
-            showAll={showAll}
-            rowKey={(row, i) => `${group.title}|${row[banColumn] ?? 'row'}|${i}`}
-            resolved={resolved}
-            onToggleResolve={onToggleResolve}
-          />
-        </div>
-      )}
-    </div>
-  );
-}
+          <table>
+            <thead>
+              <tr>
+                <th style={{ width: 44 }}>
+                  <input
+                    type="checkbox"
+                    checked={allPicked}
+                    disabled={allDone}
+                    onChange={() => onSelectAll(pending, !allPicked)}
+                  />
+                </th>
+                <th>BAN</th>
+                <th>Detail</th>
+                <th>Billed / Provisioned</th>
+                <th>Status</th>
+                <th style={{ width: 170 }}>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {group.rows.map((row) => {
+                const isPending = row._status === 'Pending';
+                const isPicked = selected.has(row._id);
+                /* The columns that have no cell of their own still carry signal. */
+                const extras = extraColumns
+                  .map(c => [c, text(row[c])])
+                  .filter(([, v]) => v !== null)
+                  .slice(0, EXTRA_DETAIL_COLUMNS);
 
-/* ---------- Account status mismatch (OM vs C360 vs BRIM) ----------
-   A second, independent check on the same BANs: the three systems must agree on the
-   account's status. The backend returns only the rows where they do not. */
-const ACCT_KEY = '__account_status__';
-
-function AccountStatusGroup({ index, acct, open, onToggleOpen, resolved, onToggleResolve }) {
-  const [showAll, setShowAll] = useState(false);
-  const columns = acct.columns ?? [];
-
-  /* Compact view: the BAN, the account type, and the three statuses being compared. */
-  const compactColumns = useMemo(
-    () => columns.filter(c =>
-      c === acct.banColumn || c === 'Account_Type' || /status/i.test(c)),
-    [columns, acct.banColumn]);
-
-  return (
-    <div className={`card issue ${open ? 'open' : ''} sev-high`}>
-      <button className="issue-head" onClick={onToggleOpen} aria-expanded={open}>
-        <span className="chev">▶</span>
-        <span style={{ flex: 1, minWidth: 0 }}>
-          <span className="issue-index">Issue {index + 1}</span>
-          <div className="issue-title">Account status mismatch — OM vs C360 vs BRIM</div>
-        </span>
-        <span className="sev sev-High">High</span>
-        <span className="count-badge">
-          {acct.mismatches} BAN{acct.mismatches === 1 ? '' : 's'} affected
-        </span>
-      </button>
-
-      {open && (
-        <div className="issue-body">
-          <div className="group-toolbar" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span className="fixplan">{acct.message}</span>
-            <button
-              className="btn btn-ghost btn-sm"
-              style={{ marginLeft: 'auto' }}
-              onClick={() => setShowAll(v => !v)}
-            >
-              {showAll ? 'Show issue summary' : 'Show all columns'}
-            </button>
-          </div>
-
-          <IssueRowsTable
-            columns={compactColumns}
-            allColumns={columns}
-            rows={acct.data}
-            banColumn={acct.banColumn}
-            issueLabel="Account status mismatch"
-            showAll={showAll}
-            rowKey={(row, i) => `${ACCT_KEY}|${row[acct.banColumn] ?? 'row'}|${i}`}
-            resolved={resolved}
-            onToggleResolve={onToggleResolve}
-          />
+                return (
+                  <tr key={row._id} className={row._status === 'Resolved' ? 'resolved' : isPicked ? 'picked' : ''}>
+                    <td>
+                      <input
+                        type="checkbox"
+                        checked={isPicked}
+                        disabled={!isPending}
+                        onChange={() => onToggleRow(row._id)}
+                      />
+                    </td>
+                    <td className="mono" style={{ fontWeight: 700 }}>{renderCell(row[banColumn])}</td>
+                    <td>
+                      {detailFor(row, group.title)}
+                      {extras.length > 0 && (
+                        <div className="mono" style={{ color: 'var(--muted)', marginTop: 4 }}>
+                          {extras.map(([c, v]) => `${c}: ${v}`).join(' · ')}
+                        </div>
+                      )}
+                    </td>
+                    <td style={{ color: 'var(--muted)' }}>
+                      {renderCell(row[BILLED_COLUMN])} → {renderCell(row[PROVISIONED_COLUMN])}
+                    </td>
+                    <td>
+                      <span className={`pill ${
+                        row._status === 'Resolved' ? 'pill-resolved'
+                        : isPending ? 'pill-pending'
+                        : 'pill-working'}`}
+                      >
+                        {row._status}
+                      </span>
+                    </td>
+                    <td>
+                      {isPending ? (
+                        <button className="btn btn-primary btn-sm" style={{ width: '100%' }} onClick={() => onResolve([row])}>
+                          Resolve
+                        </button>
+                      ) : (
+                        <button className="btn btn-sm" style={{ width: '100%' }} disabled>
+                          {row._status === 'Resolved' ? 'Synched ✓' : 'Processing…'}
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       )}
     </div>
@@ -286,54 +355,74 @@ function AccountStatusGroup({ index, acct, open, onToggleOpen, resolved, onToggl
 }
 
 function App() {
-  const [banText, setBanText] = useState('');
-  const [result, setResult]   = useState(null);   // full /check-bans response
-  const [openIds, setOpenIds] = useState(() => new Set());
-  const [resolved, setResolved] = useState(() => new Set()); // row keys marked done this session
-  const [loading, setLoading] = useState(false);
-  const [error, setError]     = useState('');
+  const [banText, setBanText]   = useState('');
+  const [result, setResult]     = useState(null);        // full /check-bans response
+  const [rows, setRows]         = useState([]);          // result.data + _id / _status / _code
+  const [selected, setSelected] = useState(() => new Set());
+  const [openIds, setOpenIds]   = useState(() => new Set());
+  const [loading, setLoading]   = useState(false);
+  const [error, setError]       = useState('');
 
   const bans = useMemo(() => parseBans(banText), [banText]);
 
-  /* The verdict column heads each group, so it is dropped from the rows beneath it. */
-  const columns = useMemo(() => {
+  /* Columns without a cell of their own; they surface under the Detail line. */
+  const extraColumns = useMemo(() => {
     if (!result) return [];
     const { columns: all = [], banColumn, verdictColumn } = result;
-    const rest = all.filter(c => c !== banColumn && c !== verdictColumn);
-    return all.includes(banColumn) ? [banColumn, ...rest] : rest;
+    const spoken = new Set([banColumn, verdictColumn, BILLED_COLUMN, PROVISIONED_COLUMN]);
+    return all.filter(c => !spoken.has(c));
   }, [result]);
 
   /* One group per distinct verdict, worst first, then by blast radius. */
   const groups = useMemo(() => {
-    if (!result?.data?.length) return [];
-    const { verdictColumn, banColumn } = result;
+    if (!rows.length || !result) return [];
+    const { banColumn } = result;
     const byVerdict = new Map();
 
-    for (const row of result.data) {
-      const key = verdictKey(row[verdictColumn]);
+    for (const row of rows) {
+      const key = row._verdict;
       if (!byVerdict.has(key)) {
-        byVerdict.set(key, { title: key, severity: verdictSeverity(row[verdictColumn]), rows: [] });
+        byVerdict.set(key, { title: key, code: row._code, severity: row._severity, rows: [] });
       }
       byVerdict.get(key).rows.push(row);
     }
 
     return [...byVerdict.values()]
-      .map(g => ({ ...g, banCount: new Set(g.rows.map(r => r[banColumn])).size }))
+      .map(g => ({
+        ...g,
+        banCount: new Set(g.rows.map(r => r[banColumn])).size,
+        route: fixRoute(g.rows),
+      }))
       .sort((a, b) =>
         (a.severity === b.severity ? 0 : a.severity === 'High' ? -1 : 1) ||
         b.rows.length - a.rows.length);
-  }, [result]);
+  }, [rows, result]);
+
+  const pendingAll  = rows.filter(r => r._status === 'Pending');
+  const resolvedAll = rows.filter(r => r._status === 'Resolved');
 
   const runCheck = useCallback(async () => {
     if (bans.length === 0) { setError('Enter at least one BAN.'); return; }
-    setError(''); setResult(null); setResolved(new Set()); setLoading(true);
+    setError(''); setResult(null); setRows([]); setSelected(new Set()); setLoading(true);
     try {
       const data = await checkBans(bans);
+      const verdictColumn = data.verdictColumn;
+      /* Rows have no natural key — BAN can repeat — so index makes _id unique. */
+      const decorated = (data.data ?? []).map((row, i) => {
+        const verdict = verdictKey(row[verdictColumn]);
+        return {
+          ...row,
+          _id: `${row[data.banColumn] ?? 'row'}#${i}`,
+          _verdict: verdict,
+          _code: issueCode(row[verdictColumn]),
+          _severity: verdictSeverity(row[verdictColumn]),
+          _status: 'Pending',
+        };
+      });
       setResult(data);
+      setRows(decorated);
       /* Start expanded — the findings are the point of the page. */
-      const ids = new Set((data.data ?? []).map(r => verdictKey(r[data.verdictColumn])));
-      if (data.accountStatus?.data?.length > 0) ids.add(ACCT_KEY);
-      setOpenIds(ids);
+      setOpenIds(new Set(decorated.map(r => r._verdict)));
     } catch (e) {
       setError(e.message);
     } finally {
@@ -341,18 +430,41 @@ function App() {
     }
   }, [bans]);
 
+  /* Optimistic: rows go to Resolving…, then Resolved, or back to Pending on failure. */
+  const resolve = useCallback(async (targets) => {
+    if (!targets.length || !result) return;
+    const ids = new Set(targets.map(t => t._id));
+    setError('');
+    setRows(prev => prev.map(r => (ids.has(r._id) ? { ...r, _status: 'Resolving…' } : r)));
+    try {
+      await resolveItems(targets, result.banColumn);
+      setRows(prev => prev.map(r => (ids.has(r._id) ? { ...r, _status: 'Resolved' } : r)));
+      setSelected(prev => {
+        const next = new Set(prev);
+        ids.forEach(id => next.delete(id));
+        return next;
+      });
+    } catch (e) {
+      setRows(prev => prev.map(r => (ids.has(r._id) ? { ...r, _status: 'Pending' } : r)));
+      setError(`${e.message} — POST ${RESOLVE_ENDPOINT} is not implemented on the Java backend yet.`);
+    }
+  }, [result]);
+
   const clearAll = () => {
-    setBanText(''); setResult(null); setError(''); setOpenIds(new Set()); setResolved(new Set());
+    setBanText(''); setResult(null); setRows([]);
+    setSelected(new Set()); setError(''); setOpenIds(new Set());
   };
 
-  const toggleResolve = useCallback((key) => setResolved(prev => {
+  const toggleRow = (id) => setSelected(prev => {
     const next = new Set(prev);
-    next.has(key) ? next.delete(key) : next.add(key);
+    next.has(id) ? next.delete(id) : next.add(id);
     return next;
-  }), []);
-
-  const acct = result?.accountStatus;
-  const acctRows = acct?.data?.length ?? 0;
+  });
+  const selectMany = (items, on) => setSelected(prev => {
+    const next = new Set(prev);
+    items.forEach(i => (on ? next.add(i._id) : next.delete(i._id)));
+    return next;
+  });
 
   const toggleOpen = (title) => setOpenIds(prev => {
     const next = new Set(prev);
@@ -376,9 +488,7 @@ function App() {
 
         <h1 style={{ margin: '0 0 6px', fontSize: 31, letterSpacing: '-.7px' }}>Data Reconciliation</h1>
         <p style={{ color: 'var(--muted)', margin: '0 0 24px', fontSize: 15 }}>
-          Source of truth: <strong style={{ color: 'var(--ink)' }}>BigQuery</strong> · Accounts with a
-          {' '}<strong style={{ color: 'var(--ink)' }}>100%</strong> verdict are fully reconciled and are
-          filtered out server-side
+          Source of truth: <strong style={{ color: 'var(--ink)' }}>BigQuery</strong>
         </p>
 
         {/* ---------- Step 1: BAN entry ---------- */}
@@ -453,17 +563,28 @@ function App() {
         {(groups.length > 0 || acctRows > 0) && (
           <>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
-              <span className="eyebrow">Step 3 — Review by issue</span>
+              <span className="eyebrow">Step 3 — Review &amp; approve by issue</span>
               <span style={{ color: 'var(--muted)', fontSize: 13 }}>
-                Feature rows whose {result.verdictColumn} is not 100%, plus account status
-                disagreements between OM, C360 and BRIM
+                {selected.size} row{selected.size === 1 ? '' : 's'} selected
+                {resolvedAll.length > 0 ? ` · ${resolvedAll.length} resolved this session` : ''}
               </span>
               <div style={{ marginLeft: 'auto', display: 'flex', gap: 10, alignItems: 'center' }}>
-                <span style={{ color: 'var(--muted)', fontSize: 13 }}>
-                  {result.elapsedMs} ms · job {result.jobId}
-                </span>
                 <button className="btn btn-ghost btn-sm" onClick={() => setAllOpen(true)}>Expand all</button>
                 <button className="btn btn-ghost btn-sm" onClick={() => setAllOpen(false)}>Collapse all</button>
+                <button
+                  className="btn btn-dark btn-sm"
+                  disabled={selected.size === 0}
+                  onClick={() => resolve(rows.filter(r => selected.has(r._id) && r._status === 'Pending'))}
+                >
+                  Resolve selected ({selected.size})
+                </button>
+                <button
+                  className="btn btn-primary btn-sm"
+                  disabled={pendingAll.length === 0}
+                  onClick={() => resolve(pendingAll)}
+                >
+                  Resolve all {pendingAll.length}
+                </button>
               </div>
             </div>
 
@@ -472,12 +593,14 @@ function App() {
                 key={g.title}
                 index={i}
                 group={g}
-                columns={columns}
+                extraColumns={extraColumns}
                 banColumn={result.banColumn}
                 open={openIds.has(g.title)}
                 onToggleOpen={() => toggleOpen(g.title)}
-                resolved={resolved}
-                onToggleResolve={toggleResolve}
+                selected={selected}
+                onToggleRow={toggleRow}
+                onSelectAll={selectMany}
+                onResolve={resolve}
               />
             ))}
 
@@ -492,13 +615,6 @@ function App() {
               />
             )}
           </>
-        )}
-
-        {result?.sql && (
-          <details className="sql" style={{ marginTop: 24 }}>
-            <summary>View the BigQuery reconciliation query that produced these rows</summary>
-            <pre>{result.sql}</pre>
-          </details>
         )}
       </div>
     </div>

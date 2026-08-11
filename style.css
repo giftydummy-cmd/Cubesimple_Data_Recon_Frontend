@@ -85,8 +85,16 @@ th { padding: 11px 16px; font-size: 11px; letter-spacing: .08em; text-transform:
 td { padding: 13px 16px; font-size: 14px; border-bottom: 1px solid var(--line); }
 tbody tr:last-child td { border-bottom: none; }
 tbody tr:hover { background: #FFFDF6; }
+tbody tr.resolved { background: #F7FCF9; }
+tbody tr.picked { background: #FFF9E3; }
+input[type=checkbox] { width: 17px; height: 17px; accent-color: var(--bs-orange); cursor: pointer; }
 
-/* ---------- severity ---------- */
+/* ---------- status & severity ---------- */
+.pill { padding: 5px 12px; border-radius: 999px; font-size: 12.5px; font-weight: 700; white-space: nowrap; display: inline-block; }
+.pill-pending  { color: #B33A0C; background: var(--bs-orange-soft); border: 1px solid #FBC7B0; }
+.pill-working  { color: var(--warn); background: var(--warn-bg); border: 1px solid #F3D9A0; }
+.pill-resolved { color: var(--success); background: var(--success-bg); border: 1px solid #A9DCC4; }
+
 .sev {
   font-size: 11px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase;
   padding: 4px 10px; border-radius: 5px;
@@ -104,6 +112,7 @@ tbody tr:hover { background: #FFFDF6; }
 .issue-head:hover { background: #FFFDF6; }
 .issue.open .issue-head { border-bottom: 1px solid var(--line); }
 .issue.sev-medium .issue-head { border-left-color: var(--bs-yellow); }
+.issue.done .issue-head { border-left-color: var(--success); background: #F7FCF9; }
 .chev { transition: transform .18s ease; color: var(--muted); font-size: 12px; width: 14px; flex: none; }
 .issue.open .chev { transform: rotate(90deg); }
 .issue-index { font-size: 11px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; color: var(--muted); }
@@ -112,6 +121,7 @@ tbody tr:hover { background: #FFFDF6; }
   background: var(--bs-black); color: #fff; border-radius: 999px;
   padding: 5px 13px; font-size: 12.5px; font-weight: 700; white-space: nowrap;
 }
+.count-badge.zero { background: var(--success); color: #fff; }
 .group-toolbar {
   display: flex; align-items: center; gap: 12px; padding: 12px 20px;
   background: #FCFAF6; border-bottom: 1px solid var(--line); flex-wrap: wrap;
@@ -123,12 +133,6 @@ tbody tr:hover { background: #FFFDF6; }
 .banner-err { background: var(--bs-orange-soft); color: #B33A0C; border: 1px solid #FBC7B0; }
 .banner-ok  { background: var(--success-bg); color: var(--success); border: 1px solid #A9DCC4; }
 .mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12.5px; }
-details.sql summary { cursor: pointer; color: var(--muted); font-size: 13px; font-weight: 600; }
-details.sql pre {
-  background: var(--bs-black); color: #F2EFE9; padding: 16px; border-radius: 10px;
-  overflow-x: auto; font-size: 12.5px; line-height: 1.5;
-  border-left: 4px solid var(--bs-yellow);
-}
 .spin {
   display: inline-block; width: 13px; height: 13px; border: 2px solid rgba(31,31,31,.25);
   border-top-color: var(--bs-black); border-radius: 50%; animation: sp .7s linear infinite;
