@@ -285,8 +285,8 @@ function IssueRowsTable({ columns, allColumns, rows, banColumn, issueLabel, show
   );
 }
 
-/* ---------- Account status mismatch (OM vs C360 vs BRIM) ----------
-   A second, independent check on the same BANs: the three systems must agree on the
+/* ---------- Account status mismatch (OM vs C360) ----------
+   A second, independent check on the same BANs: the two systems must agree on the
    account's status. The backend returns only the rows where they do not.
 
    Resolve is wired to the real thing here. OM is the source of truth, so the fix is always
@@ -298,10 +298,15 @@ const acctRowKey = (banColumn) => (row, i) => `${ACCT_KEY}|${row[banColumn] ?? '
 
 function AccountStatusGroup({ index, acct, open, onToggleOpen, results, onResolve, syncMessage }) {
   const [showAll, setShowAll] = useState(false);
-  const columns = acct.columns ?? [];
+  // BRIM is not part of this reconciliation. Keep its status out of both the
+  // summary and the optional full-column view in case the backend includes it.
+  const columns = useMemo(
+    () => (acct.columns ?? []).filter(c => String(c).toUpperCase() !== 'BRIM_ACCOUNT_STATUS'),
+    [acct.columns]
+  );
   const rows = acct.data ?? [];
 
-  /* Compact view: the BAN, the account type, and the three statuses being compared. */
+  /* Compact view: the BAN, the account type, and the two statuses being compared. */
   const compactColumns = useMemo(
     () => columns.filter(c =>
       c === acct.banColumn || c === 'Account_Type' || /status/i.test(c)),
@@ -328,7 +333,7 @@ function AccountStatusGroup({ index, acct, open, onToggleOpen, results, onResolv
         <span className="chev">▶</span>
         <span style={{ flex: 1, minWidth: 0 }}>
           <span className="issue-index">Issue {index + 1} · ACCOUNT_STATUS_MISMATCH</span>
-          <div className="issue-title">Account status mismatch — OM vs C360 vs BRIM</div>
+          <div className="issue-title">Account status mismatch — OM vs C360</div>
         </span>
         <span className="sev sev-High">High</span>
         <span className={`count-badge ${allDone ? 'zero' : ''}`}>
