@@ -5,19 +5,28 @@ import { createRoot } from 'react-dom/client';
    and when you run the shaded jar it serves this bundle itself on the same port. */
 const API = '';
 const CHECK_ENDPOINT = '/api/check-bans';
-const RESOLVE_ENDPOINT = '/api/resolve';
-/* Resolving an OM vs C360 status mismatch: the backend re-checks the two systems and, for the
-   accounts that really disagree, calls the ServiceNow om_c360_sync flow that rewrites C360 to
-   match OM. */
-const RESOLVE_ACCOUNT_STATUS_ENDPOINT = '/api/resolve-account-status';
 
-/* The backend is schema-agnostic, so the billed/provisioned pair has to be named here.
-   BRIM is the billing system; OM is Order Management, which carries what was actually
-   provisioned. Change these two if the recon table is repointed. */
-const BILLED_COLUMN = 'BRIM_PRODUCT_ID';
-const PROVISIONED_COLUMN = 'OM_PRODUCT_ID';
-/* How many of the remaining columns to surface under the Detail line. */
-const EXTRA_DETAIL_COLUMNS = 3;
+/* The backend classifies; this file only renders. Every issue section arrives with its own
+   code, title, severity, rule and column subset, so adding or retuning a check is a backend
+   change alone — nothing here needs to know what "Feature code mismatch" means. */
+
+/* Key the backend adds to every returned row: the codes of all issues that row raised. It is
+   deliberately not one of the table's columns, so it never shows up as a column of its own. */
+const ISSUE_CODES = '_issues';
+
+/* ---------- Resolve: placeholder ----------
+   The ServiceNow om_c360_sync integration this button used to call has been removed, and no
+   replacement write-back exists yet. The button is kept so the table keeps its shape for
+   whatever replaces it, but it is permanently disabled — greyed out and unclickable.
+
+   That is the honest state of things: there is nothing behind it to call. A live-looking button
+   that silently changes no system is worse than an obviously inert one, because an operator would
+   walk away believing the account was fixed.
+
+   To bring it back to life: drop the `disabled` flags below and give the two buttons an onClick
+   that posts to the new endpoint. Nothing else in the table has to change. */
+const RESOLVE_HINT =
+  'Not available: the ServiceNow sync has been removed and no replacement exists yet.';
 
 /* Shown only when the network call itself fails, i.e. nothing is listening. */
 const BACKEND_HINT =
@@ -49,39 +58,6 @@ async function post(endpoint, payload) {
 
 const checkBans = (bans) => post(CHECK_ENDPOINT, { bans });
 
-async function resolveItems(rows, banColumn) {
-  return post(RESOLVE_ENDPOINT, {
-    items: rows.map(r => ({ ban: r[banColumn], issue_code: r._code })),
-    agent: 'console-operator',
-  });
-}
-
-/* Triggers the ServiceNow sync for one or more accounts. This call answers 200 even when some
-   BANs could not be started, so the per-BAN entries in results[] — not the HTTP status — decide
-   what each row shows. Only a request that could not be attempted at all throws. */
-const resolveAccountStatus = (bans) => post(RESOLVE_ACCOUNT_STATUS_ENDPOINT, { bans });
-
-/* Per-row outcome of a sync. The backend's `reason` refines `status`, and one refinement
-   matters to the operator: NO_ORDER_IN_SERVICENOW is a failure that retrying cannot fix,
-   because the account has no order for the flow to run against. Showing it as a plain red
-   "Failed" next to a Retry button would send people round a loop that always ends the same. */
-const NO_ORDER = 'NO_ORDER_IN_SERVICENOW';
-
-const syncOutcome = (o) => (o.reason === NO_ORDER ? NO_ORDER : o.status);
-
-const SYNC_LABEL = {
-  TRIGGERED: 'Flow triggered ✓',
-  SKIPPED:   'No sync needed',
-  FAILED:    'Failed',
-  [NO_ORDER]: 'No order in ServiceNow',
-};
-const SYNC_PILL = {
-  TRIGGERED: 'pill-resolved',
-  SKIPPED:   'pill-working',
-  FAILED:    'pill-failed',
-  [NO_ORDER]: 'pill-working',
-};
-
 const isBlank = (v) => v === null || v === undefined || String(v).trim() === '';
 const text = (v) => (isBlank(v) ? null : typeof v === 'object' ? JSON.stringify(v) : String(v));
 
@@ -89,52 +65,6 @@ const text = (v) => (isBlank(v) ? null : typeof v === 'object' ? JSON.stringify(
 function renderCell(value) {
   const t = text(value);
   return t === null ? <span className="null-cell">—</span> : t;
-}
-
-function verdictSeverity(value) {
-  if (value === null || value === undefined) return 'High';
-  const numeric = parseFloat(String(value).replace('%', '').replace(/,/g, '').trim());
-  if (Number.isNaN(numeric)) return 'High';
-  return numeric < 90 ? 'High' : 'Medium';
-}
-
-/* The verdict doubles as the issue identity: every row sharing a verdict shares a root cause. */
-function verdictKey(value) {
-  if (value === null || value === undefined) return '(no verdict)';
-  return String(value);
-}
-
-/* "Additional Product in C360" -> "ADDITIONAL_PRODUCT_IN_C360" */
-const issueCode = (verdict) =>
-  verdictKey(verdict).toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'UNCLASSIFIED';
-
-/* Reads the billed/provisioned pair back as the sentence the console shows. */
-function detailFor(row, verdict) {
-  const billed = text(row[BILLED_COLUMN]);
-  const provisioned = text(row[PROVISIONED_COLUMN]);
-  if (billed && provisioned) {
-    return billed === provisioned
-      ? `Billed and provisioned as ${billed}`
-      : `Billed as ${billed}, provisioned as ${provisioned}`;
-  }
-  if (provisioned) return `Provisioned as ${provisioned}, not billed in BRIM`;
-  if (billed) return `Billed as ${billed}, not provisioned in OM`;
-  return verdictKey(verdict);
-}
-
-/* Which system has to change, inferred from whichever side of the pair is missing more
-   often across the group. Counting beats any/some: one populated row should not flip the
-   route for a group where everything else is missing. */
-function fixRoute(rows) {
-  let missingBilled = 0;
-  let missingProvisioned = 0;
-  for (const r of rows) {
-    if (isBlank(r[BILLED_COLUMN])) missingBilled++;
-    if (isBlank(r[PROVISIONED_COLUMN])) missingProvisioned++;
-  }
-  if (missingBilled > missingProvisioned) return { system: 'BRIM', action: `addProduct(${PROVISIONED_COLUMN})` };
-  if (missingProvisioned > missingBilled) return { system: 'Order Management', action: `addProduct(${BILLED_COLUMN})` };
-  return { system: 'BRIM', action: `updateProduct(${PROVISIONED_COLUMN})` };
 }
 
 /* ---------- Brightspeed mark ----------
@@ -189,221 +119,26 @@ function StatCard({ label, value, accent }) {
   );
 }
 
-/* ---------- Shared issue table ----------
-   Compact by default: the BAN, a few context columns, the issue itself, and a Resolve
-   button — the full source row is one "Show all columns" click away. Resolve here is a
-   real write: it asks the backend to run the ServiceNow sync for that account, and the
-   row then carries whatever the backend reported back for it. */
-function IssueRowsTable({ columns, allColumns, rows, banColumn, issueLabel, showAll,
-                          rowKey, results, onResolve }) {
-  const cols = showAll ? allColumns : columns;
-  return (
-    <div className="table-scroll">
-      <table>
-        <thead>
-          <tr>
-            {cols.map(c => <th key={c}>{c}</th>)}
-            <th>Issue</th>
-            <th>Status</th>
-            <th style={{ textAlign: 'right', width: 150 }}>Action</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row, i) => {
-            const key = rowKey(row, i);
-            const ban = row[banColumn];
-            const outcome = results.get(key);
-            const busy = outcome?.status === 'RESOLVING';
-            /* Only a triggered flow retires the row. A skip or a failure leaves it actionable:
-               nothing changed in C360, so striking it through would be a lie. */
-            const done = outcome?.status === 'TRIGGERED';
-            const kind = outcome && !busy ? syncOutcome(outcome) : null;
-            /* Offer Retry only where it could actually help. */
-            const retryable = kind === 'FAILED';
+/* ---------- One collapsible issue group ----------
+   Compact by default: the BAN, the two columns the rule compared, a little context, and the
+   issue itself — the full source row is one "Show all columns" click away.
 
-            return (
-              <tr key={key} style={{ opacity: done ? 0.55 : undefined }}>
-                {cols.map(col => {
-                  const isBan = col === banColumn;
-                  return (
-                    <td
-                      key={col}
-                      className={isBan ? 'mono' : undefined}
-                      style={{
-                        fontWeight: isBan ? 700 : undefined,
-                        color: isBan ? undefined : 'var(--muted)',
-                        textDecoration: done ? 'line-through' : undefined,
-                      }}
-                    >
-                      {renderCell(row[col])}
-                    </td>
-                  );
-                })}
-                <td style={{ color: '#B33A0C', fontWeight: 600, textDecoration: done ? 'line-through' : undefined }}>
-                  {issueLabel}
-                </td>
-                <td style={{ minWidth: 240 }}>
-                  {outcome ? (
-                    <>
-                      <span className={`pill ${busy ? 'pill-working' : SYNC_PILL[kind] ?? 'pill-pending'}`}>
-                        {busy ? 'Triggering…' : SYNC_LABEL[kind] ?? outcome.status}
-                      </span>
-                      {outcome.message && (
-                        <div style={{ color: 'var(--muted)', fontSize: 12, marginTop: 5 }}>
-                          {outcome.serviceNowMessage ?? outcome.message}
-                        </div>
-                      )}
-                      {outcome.orderId && (
-                        <div className="mono" style={{ color: 'var(--muted)', fontSize: 12, marginTop: 3 }}>
-                          Order {outcome.orderId}
-                          {outcome.orderStatus ? ` · ${outcome.orderStatus}` : ''}
-                        </div>
-                      )}
-                    </>
-                  ) : (
-                    <span className="pill pill-pending">Pending</span>
-                  )}
-                </td>
-                <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
-                  <button
-                    className={done || kind === NO_ORDER ? 'btn btn-ghost btn-sm' : 'btn btn-primary btn-sm'}
-                    disabled={busy || done || kind === NO_ORDER}
-                    onClick={() => onResolve([{ key, ban }])}
-                  >
-                    {busy ? <><span className="spin" />Triggering…</>
-                      : done ? 'Synched ✓'
-                      : kind === NO_ORDER ? 'Not syncable'
-                      : retryable ? 'Retry' : 'Resolve'}
-                  </button>
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-/* ---------- Account status mismatch (OM vs C360) ----------
-   A second, independent check on the same BANs: the two systems must agree on the
-   account's status. The backend returns only the rows where they do not.
-
-   Resolve is wired to the real thing here. OM is the source of truth, so the fix is always
-   in the same direction — C360 is brought up to OM — and the backend runs it through the
-   ServiceNow om_c360_sync flow. */
-const ACCT_KEY = '__account_status__';
-
-const acctRowKey = (banColumn) => (row, i) => `${ACCT_KEY}|${row[banColumn] ?? 'row'}|${i}`;
-
-function AccountStatusGroup({ index, acct, open, onToggleOpen, results, onResolve, syncMessage }) {
+   The same row can appear under two or three issues, which is correct: an operator works one
+   issue at a time. So each row also names the *other* issues it raised, from the backend's
+   `_issues` list, and the reader is never left thinking the row has only this one problem. */
+function IssueGroup({ index, group, allColumns, titleByCode, open, onToggleOpen }) {
   const [showAll, setShowAll] = useState(false);
-  // BRIM is not part of this reconciliation. Keep its status out of both the
-  // summary and the optional full-column view in case the backend includes it.
-  const columns = useMemo(
-    () => (acct.columns ?? []).filter(c => String(c).toUpperCase() !== 'BRIM_ACCOUNT_STATUS'),
-    [acct.columns]
-  );
-  const rows = acct.data ?? [];
+  const cols = showAll ? allColumns : (group.columns ?? []);
+  const rows = group.data ?? [];
+  const sevClass = group.severity === 'High' ? 'sev-high' : 'sev-medium';
 
-  /* Compact view: the BAN, the account type, and the two statuses being compared. */
-  const compactColumns = useMemo(
-    () => columns.filter(c =>
-      c === acct.banColumn || c === 'Account_Type' || /status/i.test(c)),
-    [columns, acct.banColumn]);
-
-  const keyOf = useMemo(() => acctRowKey(acct.banColumn), [acct.banColumn]);
-
-  /* Rows still worth sending: not already triggered, not mid-flight, and not one of the
-     accounts ServiceNow has no order for — those would fail identically every time. */
-  const outstanding = rows
-    .map((row, i) => ({ key: keyOf(row, i), ban: row[acct.banColumn] }))
-    .filter(e => {
-      const o = results.get(e.key);
-      return o?.status !== 'TRIGGERED' && o?.status !== 'RESOLVING' && o?.reason !== NO_ORDER;
-    });
-
-  const busy = rows.some((row, i) => results.get(keyOf(row, i))?.status === 'RESOLVING');
-  const triggered = rows.filter((row, i) => results.get(keyOf(row, i))?.status === 'TRIGGERED').length;
-  const allDone = rows.length > 0 && triggered === rows.length;
+  /* A row's identity within this group. Rows have no natural key — a BAN legitimately repeats,
+     once per product or feature — so the index carries the uniqueness. The group code is in the
+     key too, because the same row shown under two issues is two separate findings. */
+  const keyOf = (row, i) => `${group.code}|${row[group.banColumn] ?? 'row'}|${i}`;
 
   return (
-    <div className={`card issue ${open ? 'open' : ''} ${allDone ? 'done' : 'sev-high'}`}>
-      <button className="issue-head" onClick={onToggleOpen} aria-expanded={open}>
-        <span className="chev">▶</span>
-        <span style={{ flex: 1, minWidth: 0 }}>
-          <span className="issue-index">Issue {index + 1} · ACCOUNT_STATUS_MISMATCH</span>
-          <div className="issue-title">Account status mismatch — OM vs C360</div>
-        </span>
-        <span className="sev sev-High">High</span>
-        <span className={`count-badge ${allDone ? 'zero' : ''}`}>
-          {allDone
-            ? `All ${rows.length} triggered ✓`
-            : `${acct.mismatches} BAN${acct.mismatches === 1 ? '' : 's'} affected`}
-        </span>
-      </button>
-
-      {open && (
-        <div className="issue-body">
-          <div className="group-toolbar" style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-            <span className="fixplan">
-              Fix route: ServiceNow · om_c360_sync(BAN) — C360 is updated to match OM
-            </span>
-            <div style={{ marginLeft: 'auto', display: 'flex', gap: 10 }}>
-              <button className="btn btn-ghost btn-sm" onClick={() => setShowAll(v => !v)}>
-                {showAll ? 'Show issue summary' : 'Show all columns'}
-              </button>
-              <button
-                className="btn btn-primary btn-sm"
-                disabled={busy || outstanding.length === 0}
-                onClick={() => onResolve(outstanding)}
-              >
-                {busy
-                  ? <><span className="spin" />Triggering…</>
-                  : `Resolve all ${outstanding.length} in this issue`}
-              </button>
-            </div>
-          </div>
-
-          {syncMessage?.text && (
-            <div
-              className={`banner ${syncMessage.ok ? 'banner-ok' : 'banner-err'}`}
-              style={{ margin: '0 0 14px' }}
-            >
-              {syncMessage.text}
-            </div>
-          )}
-
-          <IssueRowsTable
-            columns={compactColumns}
-            allColumns={columns}
-            rows={rows}
-            banColumn={acct.banColumn}
-            issueLabel="Account status mismatch"
-            showAll={showAll}
-            rowKey={keyOf}
-            results={results}
-            onResolve={onResolve}
-          />
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* ---------- One collapsible issue group ---------- */
-function IssueGroup({
-  index, group, extraColumns, banColumn, open, onToggleOpen,
-  selected, onToggleRow, onSelectAll, onResolve,
-}) {
-  const pending   = group.rows.filter(r => r._status === 'Pending');
-  const picked    = pending.filter(r => selected.has(r._id));
-  const allPicked = pending.length > 0 && picked.length === pending.length;
-  const allDone   = pending.length === 0;
-  const sevClass  = group.severity === 'High' ? 'sev-high' : 'sev-medium';
-
-  return (
-    <div className={`card issue ${open ? 'open' : ''} ${allDone ? 'done' : sevClass}`}>
+    <div className={`card issue ${open ? 'open' : ''} ${sevClass}`}>
       <button className="issue-head" onClick={onToggleOpen} aria-expanded={open}>
         <span className="chev">▶</span>
         <span style={{ flex: 1, minWidth: 0 }}>
@@ -411,107 +146,85 @@ function IssueGroup({
           <div className="issue-title">{group.title}</div>
         </span>
         <span className={`sev sev-${group.severity}`}>{group.severity}</span>
-        <span className={`count-badge ${allDone ? 'zero' : ''}`}>
-          {allDone
-            ? `All ${group.rows.length} resolved ✓`
-            : `${group.banCount} BAN${group.banCount === 1 ? '' : 's'} affected`}
+        <span className="count-badge">
+          {group.banCount} BAN{group.banCount === 1 ? '' : 's'} affected
         </span>
       </button>
 
       {open && (
         <div className="issue-body">
-          <div className="group-toolbar" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span className="fixplan">
-              Fix route: {group.route.system} · {group.route.action}
+          <div className="group-toolbar">
+            <span className="fixplan">Rule: {group.rule}</span>
+            <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>
+              {group.summary} · {group.rowCount} row{group.rowCount === 1 ? '' : 's'}
             </span>
             <div style={{ marginLeft: 'auto', display: 'flex', gap: 10 }}>
-              <button className="btn btn-ghost btn-sm" onClick={() => onSelectAll(pending, !allPicked)} disabled={allDone}>
-                {allPicked ? 'Clear selection' : `Select all ${pending.length}`}
+              <button className="btn btn-ghost btn-sm" onClick={() => setShowAll(v => !v)}>
+                {showAll ? 'Show issue summary' : 'Show all columns'}
               </button>
-              <button className="btn btn-dark btn-sm" onClick={() => onResolve(picked)} disabled={picked.length === 0}>
-                Resolve selected ({picked.length})
-              </button>
-              <button className="btn btn-primary btn-sm" onClick={() => onResolve(pending)} disabled={allDone}>
-                Resolve all in this issue
+              <button className="btn btn-primary btn-sm" title={RESOLVE_HINT} disabled>
+                Resolve all {rows.length} in this issue
               </button>
             </div>
           </div>
 
-          <table>
-            <thead>
-              <tr>
-                <th style={{ width: 44 }}>
-                  <input
-                    type="checkbox"
-                    checked={allPicked}
-                    disabled={allDone}
-                    onChange={() => onSelectAll(pending, !allPicked)}
-                  />
-                </th>
-                <th>BAN</th>
-                <th>Detail</th>
-                <th>Billed / Provisioned</th>
-                <th>Status</th>
-                <th style={{ width: 170 }}>Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {group.rows.map((row) => {
-                const isPending = row._status === 'Pending';
-                const isPicked = selected.has(row._id);
-                /* The columns that have no cell of their own still carry signal. */
-                const extras = extraColumns
-                  .map(c => [c, text(row[c])])
-                  .filter(([, v]) => v !== null)
-                  .slice(0, EXTRA_DETAIL_COLUMNS);
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  {cols.map(c => <th key={c}>{c}</th>)}
+                  <th>Issue</th>
+                  <th>Status</th>
+                  <th style={{ textAlign: 'right', width: 150 }}>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, i) => {
+                  const key = keyOf(row, i);
+                  /* The other findings on this very row, named rather than coded. */
+                  const also = (row[ISSUE_CODES] ?? [])
+                    .filter(code => code !== group.code)
+                    .map(code => titleByCode[code] ?? code);
 
-                return (
-                  <tr key={row._id} className={row._status === 'Resolved' ? 'resolved' : isPicked ? 'picked' : ''}>
-                    <td>
-                      <input
-                        type="checkbox"
-                        checked={isPicked}
-                        disabled={!isPending}
-                        onChange={() => onToggleRow(row._id)}
-                      />
-                    </td>
-                    <td className="mono" style={{ fontWeight: 700 }}>{renderCell(row[banColumn])}</td>
-                    <td>
-                      {detailFor(row, group.title)}
-                      {extras.length > 0 && (
-                        <div className="mono" style={{ color: 'var(--muted)', marginTop: 4 }}>
-                          {extras.map(([c, v]) => `${c}: ${v}`).join(' · ')}
-                        </div>
-                      )}
-                    </td>
-                    <td style={{ color: 'var(--muted)' }}>
-                      {renderCell(row[BILLED_COLUMN])} → {renderCell(row[PROVISIONED_COLUMN])}
-                    </td>
-                    <td>
-                      <span className={`pill ${
-                        row._status === 'Resolved' ? 'pill-resolved'
-                        : isPending ? 'pill-pending'
-                        : 'pill-working'}`}
-                      >
-                        {row._status}
-                      </span>
-                    </td>
-                    <td>
-                      {isPending ? (
-                        <button className="btn btn-primary btn-sm" style={{ width: '100%' }} onClick={() => onResolve([row])}>
+                  return (
+                    <tr key={key}>
+                      {cols.map(col => {
+                        const isBan = col === group.banColumn;
+                        return (
+                          <td
+                            key={col}
+                            className={isBan ? 'mono' : undefined}
+                            style={{
+                              fontWeight: isBan ? 700 : undefined,
+                              color: isBan ? undefined : 'var(--muted)',
+                            }}
+                          >
+                            {renderCell(row[col])}
+                          </td>
+                        );
+                      })}
+                      <td style={{ minWidth: 210 }}>
+                        <span className="pill pill-pending">{group.title}</span>
+                        {also.length > 0 && (
+                          <div style={{ color: 'var(--muted)', fontSize: 12, marginTop: 5 }}>
+                            Same row also: {also.join(', ')}
+                          </div>
+                        )}
+                      </td>
+                      <td>
+                        <span className="pill pill-pending">Pending</span>
+                      </td>
+                      <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                        <button className="btn btn-primary btn-sm" title={RESOLVE_HINT} disabled>
                           Resolve
                         </button>
-                      ) : (
-                        <button className="btn btn-sm" style={{ width: '100%' }} disabled>
-                          {row._status === 'Resolved' ? 'Synched ✓' : 'Processing…'}
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </div>
@@ -519,81 +232,31 @@ function IssueGroup({
 }
 
 function App() {
-  const [banText, setBanText]   = useState('');
-  const [result, setResult]     = useState(null);        // full /check-bans response
-  const [rows, setRows]         = useState([]);          // result.data + _id / _status / _code
-  const [selected, setSelected] = useState(() => new Set());
-  const [openIds, setOpenIds]   = useState(() => new Set());
-  /* Row key -> the backend's outcome for that account, or {status:'RESOLVING'} while in flight. */
-  const [acctResults, setAcctResults] = useState(() => new Map());
-  /* { text, ok } — ok drives green vs orange, so a batch that triggered nothing never reads
-     as a success. */
-  const [acctMessage, setAcctMessage] = useState(null);
-  const [loading, setLoading]   = useState(false);
-  const [error, setError]       = useState('');
+  const [banText, setBanText] = useState('');
+  const [result, setResult]   = useState(null);        // full /check-bans response
+  const [openIds, setOpenIds] = useState(() => new Set());
+  const [loading, setLoading] = useState(false);
+  const [error, setError]     = useState('');
 
   const bans = useMemo(() => parseBans(banText), [banText]);
 
-  /* Columns without a cell of their own; they surface under the Detail line. */
-  const extraColumns = useMemo(() => {
-    if (!result) return [];
-    const { columns: all = [], banColumn, verdictColumn } = result;
-    const spoken = new Set([banColumn, verdictColumn, BILLED_COLUMN, PROVISIONED_COLUMN]);
-    return all.filter(c => !spoken.has(c));
-  }, [result]);
+  const groups = result?.issues ?? [];
 
-  /* One group per distinct verdict, worst first, then by blast radius. */
-  const groups = useMemo(() => {
-    if (!rows.length || !result) return [];
-    const { banColumn } = result;
-    const byVerdict = new Map();
-
-    for (const row of rows) {
-      const key = row._verdict;
-      if (!byVerdict.has(key)) {
-        byVerdict.set(key, { title: key, code: row._code, severity: row._severity, rows: [] });
-      }
-      byVerdict.get(key).rows.push(row);
-    }
-
-    return [...byVerdict.values()]
-      .map(g => ({
-        ...g,
-        banCount: new Set(g.rows.map(r => r[banColumn])).size,
-        route: fixRoute(g.rows),
-      }))
-      .sort((a, b) =>
-        (a.severity === b.severity ? 0 : a.severity === 'High' ? -1 : 1) ||
-        b.rows.length - a.rows.length);
-  }, [rows, result]);
-
-  const pendingAll = rows.filter(r => r._status === 'Pending');
+  /* Issue code -> its human title, so a row can name its other findings without the frontend
+     hard-coding any of them. */
+  const titleByCode = useMemo(
+    () => Object.fromEntries(groups.map(g => [g.code, g.title])),
+    [groups]
+  );
 
   const runCheck = useCallback(async () => {
     if (bans.length === 0) { setError('Enter at least one BAN.'); return; }
-    setError(''); setResult(null); setRows([]); setSelected(new Set());
-    setAcctResults(new Map()); setAcctMessage(null); setLoading(true);
+    setError(''); setResult(null); setLoading(true);
     try {
       const data = await checkBans(bans);
-      const verdictColumn = data.verdictColumn;
-      /* Rows have no natural key — BAN can repeat — so index makes _id unique. */
-      const decorated = (data.data ?? []).map((row, i) => {
-        const verdict = verdictKey(row[verdictColumn]);
-        return {
-          ...row,
-          _id: `${row[data.banColumn] ?? 'row'}#${i}`,
-          _verdict: verdict,
-          _code: issueCode(row[verdictColumn]),
-          _severity: verdictSeverity(row[verdictColumn]),
-          _status: 'Pending',
-        };
-      });
       setResult(data);
-      setRows(decorated);
       /* Start expanded — the findings are the point of the page. */
-      const ids = new Set(decorated.map(r => r._verdict));
-      if (data.accountStatus?.data?.length > 0) ids.add(ACCT_KEY);
-      setOpenIds(ids);
+      setOpenIds(new Set((data.issues ?? []).map(g => g.code)));
     } catch (e) {
       setError(e.message);
     } finally {
@@ -601,99 +264,16 @@ function App() {
     }
   }, [bans]);
 
-  /* Optimistic: rows go to Resolving…, then Resolved, or back to Pending on failure. */
-  const resolve = useCallback(async (targets) => {
-    if (!targets.length || !result) return;
-    const ids = new Set(targets.map(t => t._id));
-    setError('');
-    setRows(prev => prev.map(r => (ids.has(r._id) ? { ...r, _status: 'Resolving…' } : r)));
-    try {
-      await resolveItems(targets, result.banColumn);
-      setRows(prev => prev.map(r => (ids.has(r._id) ? { ...r, _status: 'Resolved' } : r)));
-      setSelected(prev => {
-        const next = new Set(prev);
-        ids.forEach(id => next.delete(id));
-        return next;
-      });
-    } catch (e) {
-      setRows(prev => prev.map(r => (ids.has(r._id) ? { ...r, _status: 'Pending' } : r)));
-      setError(`${e.message} — POST ${RESOLVE_ENDPOINT} is not implemented on the Java backend yet.`);
-    }
-  }, [result]);
-
   const clearAll = () => {
-    setBanText(''); setResult(null); setRows([]);
-    setSelected(new Set()); setError(''); setOpenIds(new Set());
-    setAcctResults(new Map()); setAcctMessage(null);
+    setBanText(''); setResult(null); setError(''); setOpenIds(new Set());
   };
 
-  /* Resolve an OM vs C360 mismatch for real: hand the BANs to the backend, which re-checks
-     them and triggers the ServiceNow sync flow for the ones that still disagree.
-
-     The call returns 200 even when individual accounts fail, so each row is updated from its
-     own entry in results[] rather than from the HTTP status. Only a request that could not be
-     attempted at all (nothing listening, ServiceNow not configured) lands in catch, and there
-     the rows go back to Pending so the operator can retry. */
-  const resolveAccountStatusRows = useCallback(async (entries) => {
-    if (!entries.length) return;
-    setError(''); setAcctMessage(null);
-
-    setAcctResults(prev => {
-      const next = new Map(prev);
-      entries.forEach(e => next.set(e.key, { status: 'RESOLVING' }));
-      return next;
-    });
-
-    try {
-      const data = await resolveAccountStatus(entries.map(e => e.ban));
-      const byBan = new Map((data.results ?? []).map(r => [String(r.ban), r]));
-      setAcctResults(prev => {
-        const next = new Map(prev);
-        for (const e of entries) {
-          const r = byBan.get(String(e.ban));
-          next.set(e.key, r ?? {
-            status: 'FAILED',
-            message: 'The backend did not report an outcome for this BAN.',
-          });
-        }
-        return next;
-      });
-      /* Green only if something actually started. A batch where every account was skipped or
-         had no order is a real answer, but it is not a success. */
-      setAcctMessage({ text: data.message ?? '', ok: (data.triggered ?? 0) > 0 });
-    } catch (e) {
-      /* Nothing was started, so drop the in-flight marks rather than leaving spinners behind. */
-      setAcctResults(prev => {
-        const next = new Map(prev);
-        entries.forEach(e => next.delete(e.key));
-        return next;
-      });
-      setError(e.message);
-    }
-  }, []);
-
-  const acct = result?.accountStatus;
-  const acctRows = acct?.data?.length ?? 0;
-
-  const toggleRow = (id) => setSelected(prev => {
+  const toggleOpen = (code) => setOpenIds(prev => {
     const next = new Set(prev);
-    next.has(id) ? next.delete(id) : next.add(id);
+    next.has(code) ? next.delete(code) : next.add(code);
     return next;
   });
-  const selectMany = (items, on) => setSelected(prev => {
-    const next = new Set(prev);
-    items.forEach(i => (on ? next.add(i._id) : next.delete(i._id)));
-    return next;
-  });
-
-  const toggleOpen = (title) => setOpenIds(prev => {
-    const next = new Set(prev);
-    next.has(title) ? next.delete(title) : next.add(title);
-    return next;
-  });
-  const setAllOpen = (on) => setOpenIds(on
-    ? new Set([...groups.map(g => g.title), ...(acctRows > 0 ? [ACCT_KEY] : [])])
-    : new Set());
+  const setAllOpen = (on) => setOpenIds(on ? new Set(groups.map(g => g.code)) : new Set());
 
   return (
     <div>
@@ -717,7 +297,7 @@ function App() {
           <textarea
             value={banText}
             onChange={(e) => setBanText(e.target.value)}
-            placeholder="BAN-1000467924, BAN-1000893302 …"
+            placeholder="313497356, 423207561 …"
             spellCheck="false"
           />
           <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 14, flexWrap: 'wrap' }}>
@@ -737,23 +317,16 @@ function App() {
 
         {error && <div className="banner banner-err" style={{ marginBottom: 20 }}>{error}</div>}
 
-        {/* "No discrepancies found." comes straight from the backend — but only when the
-            account-status check found nothing either. */}
-        {result && result.totalDiscrepancies === 0 && !(result.accountStatus?.mismatches > 0) && (
+        {/* "No discrepancies found." comes straight from the backend. */}
+        {result && groups.length === 0 && (
           <div className="banner banner-ok" style={{ marginBottom: 20 }}>
             {result.message}
-            {result.accountStatus ? ` ${result.accountStatus.message}` : ''}
-          </div>
-        )}
-        {result?.accountStatus?.message?.startsWith('Account status check failed') && (
-          <div className="banner banner-err" style={{ marginBottom: 20 }}>
-            {result.accountStatus.message}
           </div>
         )}
         {result && result.missingBans?.length > 0 && (
           <div className="banner banner-err" style={{ marginBottom: 20 }}>
             {result.missingBans.length} BAN{result.missingBans.length === 1 ? ' was' : 's were'} not found
-            in any reconciliation table: {result.missingBans.slice(0, 10).join(', ')}
+            in the reconciliation table: {result.missingBans.slice(0, 10).join(', ')}
             {result.missingBans.length > 10 ? ` (+${result.missingBans.length - 10} more)` : ''}
           </div>
         )}
@@ -764,69 +337,42 @@ function App() {
           </div>
         )}
 
-        {/* ---------- Step 2: summary ---------- */}
+        {/* ---------- Step 2: summary ----------
+            Accounts and issues are counted separately on purpose: one BAN can raise all three
+            issues across its rows, so the two numbers are not meant to agree. */}
         {result && (
           <div style={{ display: 'flex', gap: 14, marginBottom: 24, flexWrap: 'wrap' }}>
-            <StatCard label="Accounts scanned"    value={result.totalScanned}             accent="var(--bs-black)" />
-            <StatCard label="Discrepancies found" value={result.totalDiscrepancies}       accent="var(--bs-orange)" />
-            {result.accountStatus && (
-              <StatCard label="Status mismatches" value={result.accountStatus.mismatches} accent="#B33A0C" />
-            )}
-            <StatCard label="Not found in table"  value={result.missingBans?.length ?? 0} accent="#C9C3B8" />
+            <StatCard label="Accounts scanned"  value={result.totalScanned}             accent="var(--bs-black)" />
+            <StatCard label="Accounts affected" value={result.affectedBans}             accent="var(--bs-orange)" />
+            <StatCard label="Issues found"      value={result.totalIssues}              accent="#B33A0C" />
+            <StatCard label="Not found in table" value={result.missingBans?.length ?? 0} accent="#C9C3B8" />
           </div>
         )}
 
         {/* ---------- Step 3: one collapsible section per issue ---------- */}
-        {(groups.length > 0 || acctRows > 0) && (
+        {groups.length > 0 && (
           <>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
+              <span style={{ color: 'var(--muted)', fontSize: 13 }}>
+                {result.cleanRows} clean row{result.cleanRows === 1 ? '' : 's'} filtered out
+              </span>
               <div style={{ marginLeft: 'auto', display: 'flex', gap: 10, alignItems: 'center' }}>
                 <button className="btn btn-ghost btn-sm" onClick={() => setAllOpen(true)}>Expand all</button>
                 <button className="btn btn-ghost btn-sm" onClick={() => setAllOpen(false)}>Collapse all</button>
-                <button
-                  className="btn btn-dark btn-sm"
-                  disabled={selected.size === 0}
-                  onClick={() => resolve(rows.filter(r => selected.has(r._id) && r._status === 'Pending'))}
-                >
-                  Resolve selected ({selected.size})
-                </button>
-                <button
-                  className="btn btn-primary btn-sm"
-                  disabled={pendingAll.length === 0}
-                  onClick={() => resolve(pendingAll)}
-                >
-                  Resolve all {pendingAll.length}
-                </button>
               </div>
             </div>
 
             {groups.map((g, i) => (
               <IssueGroup
-                key={g.title}
+                key={g.code}
                 index={i}
-                group={g}
-                extraColumns={extraColumns}
-                banColumn={result.banColumn}
-                open={openIds.has(g.title)}
-                onToggleOpen={() => toggleOpen(g.title)}
-                selected={selected}
-                onToggleRow={toggleRow}
-                onSelectAll={selectMany}
-                onResolve={resolve}
+                group={{ ...g, banColumn: result.banColumn }}
+                allColumns={result.columns ?? []}
+                titleByCode={titleByCode}
+                open={openIds.has(g.code)}
+                onToggleOpen={() => toggleOpen(g.code)}
               />
             ))}
-
-            {acctRows > 0 && (
-              <AccountStatusGroup
-                index={groups.length}
-                acct={acct}
-                open={openIds.has(ACCT_KEY)}
-                onToggleOpen={() => toggleOpen(ACCT_KEY)}
-                results={acctResults}
-                onResolve={resolveAccountStatusRows}
-                syncMessage={acctMessage}
-              />
-            )}
           </>
         )}
       </div>
